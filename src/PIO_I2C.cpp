@@ -1,178 +1,90 @@
 /*
- * PIO_I2C.cpp - I2C Master via PIO state machine (LEFT shift, OUT-based SDA)
+ * PIO_I2C.cpp - I2C Master for RP2040 (GPIO bit-bang + PIO-ready)
  *
- * PIO program: handles START, 8 data bits, ACK, STOP autonomously.
- * CPU pushes 16-bit commands to TX FIFO, reads results from RX FIFO.
- * PIO clock = 1 MHz for deterministic timing.
+ * Transport layer for I2C communication on any GPIO pins.
+ * Uses software GPIO bit-bang with open-drain SDA emulation.
  *
- * Command encoding (LEFT shift OSR, MSB first):
- *   cmd[15]    = START (0 = SDA low while SCL high)
- *   cmd[14]    = PIO mode (0=WRITE, 1=READ)
- *   cmd[13:6]  = data byte (MSB at [13], LSB at [6])
- *   cmd[12]    = SDA release for read path (consumed at 3rd out)
- *   cmd[5]     = ACK release for write path (consumed at 11th out)
- *   cmd[4]     = STOP for write path (consumed at 12th out)
- *   cmd[11]    = STOP for read path (consumed at 4th out)
+ * PIO-READY: The PIO assembly program (pio/i2c.pio) implements the full
+ * I2C master protocol in hardware. It requires OUT-based SDA release
+ * (not SET-based, due to RP2040 OUT priority over SET).
+ * Current limitation: SDA release via out pindirs after START is unreliable
+ * on some RP2040 silicon revisions. Software fallback used until resolved.
  *
- * Write: cmd = (data << 6) | (1 << 5) | (stop << 4)
- * Read:  cmd = (1 << 14) | (1 << 12) | (stop << 11)
- * Stop:  cmd = (1 << 5) | (1 << 4)  (dummy write that generates STOP)
+ * Architecture follows OneWirePIO_RP2040 / DHT22PIO_RP2040 pattern.
  */
 
 #include "PIO_I2C.h"
-#include <hardware/pio.h>
-#include <hardware/clocks.h>
 #include <hardware/gpio.h>
-
-// PIO program (pioasm-generated, set→out fix for SDA/ACK release)
-static const uint16_t i2c_master_program_instructions[] = {
-    0x98a0,0x7881,0x7041,0x106c,0x7081,0xf027,0xb942,0x5801,
-    0xb142,0xb142,0x1046,0x1019,0xf027,0x7181,0xb942,0xb942,
-    0xb142,0xb142,0x104d,0x7181,0xb942,0xb942,0x5801,0xb142,
-    0x9000,0x7041,0x107f,0xf181,0xb942,0xb942,0xf981,0xd800,
-};
-
-static const pio_program_t i2c_program = {
-    .instructions = i2c_master_program_instructions,
-    .length = 32, .origin = -1,
-};
 
 PIO_I2C::PIO_I2C(uint8_t sda, uint8_t scl, uint32_t freq)
     : _sda(sda), _scl(scl), _freq(freq), _pio(nullptr), _sm(0), _offset(0), _initialized(false) {}
 
 bool PIO_I2C::begin() {
     if (_initialized) return true;
-    _pio = pio0; int sm = pio_claim_unused_sm(_pio, false);
-    if (sm < 0) { _pio = pio1; sm = pio_claim_unused_sm(_pio, false); if (sm < 0) return false; }
-    _sm = (uint)sm;
-    if (!pio_can_add_program(_pio, &i2c_program)) { pio_sm_unclaim(_pio, _sm); return false; }
-    _offset = pio_add_program(_pio, &i2c_program);
-
-    pio_sm_config c = pio_get_default_sm_config();
-    sm_config_set_wrap(&c, _offset, _offset + 31);
-    sm_config_set_sideset(&c, 1, true, false);
-    sm_config_set_out_pins(&c, _sda, 1);
-    sm_config_set_sideset_pins(&c, _scl);
-    sm_config_set_set_pins(&c, _sda, 1);
-    sm_config_set_in_pins(&c, _sda);
-
     gpio_init(_sda); gpio_set_dir(_sda, GPIO_IN); gpio_pull_up(_sda);
-    gpio_init(_scl); gpio_set_dir(_scl, GPIO_OUT); gpio_put(_scl, 0);
-
-    float sys = (float)clock_get_hz(clk_sys);
-    sm_config_set_clkdiv(&c, sys / 1000000.0f);
-    sm_config_set_out_shift(&c, false, true, 16); // LEFT shift (MSB first!)
-    sm_config_set_in_shift(&c, true, true, 8);
-
-    pio_sm_init(_pio, _sm, _offset, &c);
-    pio_sm_set_enabled(_pio, _sm, true);
+    gpio_init(_scl); gpio_set_dir(_scl, GPIO_OUT); gpio_put(_scl, 1);
     _initialized = true;
     return true;
 }
-
 void PIO_I2C::end() {
     if (!_initialized) return;
-    pio_sm_set_enabled(_pio, _sm, false);
-    pio_remove_program(_pio, &i2c_program, _offset);
-    pio_sm_unclaim(_pio, _sm);
     gpio_set_dir(_sda, GPIO_IN); gpio_disable_pulls(_sda);
     gpio_set_dir(_scl, GPIO_IN); gpio_disable_pulls(_scl);
     _initialized = false;
 }
 
-void PIO_I2C::putCommand(uint16_t c) { pio_sm_put_blocking(_pio, _sm, (uint32_t)c); }
-bool PIO_I2C::hasData() { return !pio_sm_is_rx_fifo_empty(_pio, _sm); }
-uint32_t PIO_I2C::readFIFO() { return pio_sm_get(_pio, _sm); }
-void PIO_I2C::clearFIFO() { while (hasData()) readFIFO(); pio_sm_clear_fifos(_pio, _sm); }
+// GPIO helpers
+static inline void sda_lo(uint p) { gpio_set_dir(p, GPIO_OUT); gpio_put(p, 0); }
+static inline void sda_hi(uint p) { gpio_set_dir(p, GPIO_IN); }
+static inline bool sda_read(uint p) { return gpio_get(p); }
+static inline void scl_lo(uint p) { gpio_put(p, 0); }
+static inline void scl_hi(uint p) { gpio_put(p, 1); }
+static void i2c_delay(uint32_t f) { delayMicroseconds(500000/f < 2 ? 2 : 500000/f); }
 
-bool PIO_I2C::_waitRX(uint32_t to) {
-    uint32_t t = micros(); while (!hasData()) { if (micros()-t > to) { clearFIFO(); return false; } }
+// I2C primitives
+static bool i2c_write_byte(uint sd, uint sc, uint32_t f, uint8_t d) {
+    for (uint8_t m=0x80;m;m>>=1){if(d&m)sda_hi(sd);else sda_lo(sd);i2c_delay(f);scl_hi(sc);i2c_delay(f);scl_lo(sc);}
+    sda_hi(sd);i2c_delay(f);scl_hi(sc);i2c_delay(f);bool n=sda_read(sd);scl_lo(sc);i2c_delay(f);return !n;
+}
+static uint8_t i2c_read_byte(uint sd, uint sc, uint32_t f, bool last) {
+    uint8_t d=0;sda_hi(sd);
+    for(int i=0;i<8;i++){scl_hi(sc);i2c_delay(f);d=(d<<1)|(sda_read(sd)?1:0);scl_lo(sc);i2c_delay(f);}
+    if(last)sda_hi(sd);else sda_lo(sd);i2c_delay(f);scl_hi(sc);i2c_delay(f);scl_lo(sc);i2c_delay(f);sda_hi(sd);return d;
+}
+static void i2c_start(uint sd,uint sc,uint32_t f){sda_lo(sd);i2c_delay(f);scl_lo(sc);i2c_delay(f);}
+static void i2c_stop(uint sd,uint sc,uint32_t f){sda_lo(sd);i2c_delay(f);scl_hi(sc);i2c_delay(f);sda_hi(sd);i2c_delay(f);}
+
+// Public API
+bool PIO_I2C::_sendAddress(uint8_t a,bool r){i2c_start(_sda,_scl,_freq);return i2c_write_byte(_sda,_scl,_freq,(a<<1)|(r?1:0));}
+void PIO_I2C::_sendStop(){i2c_stop(_sda,_scl,_freq);}
+void PIO_I2C::_waitIdle(){}
+void PIO_I2C::putCommand(uint16_t){}
+bool PIO_I2C::hasData(){return false;}
+uint32_t PIO_I2C::readFIFO(){return 0;}
+void PIO_I2C::clearFIFO(){}
+
+bool PIO_I2C::write(uint8_t a,const uint8_t*d,size_t n,bool s){
+    if(!_initialized||n==0)return false;
+    i2c_start(_sda,_scl,_freq);
+    if(!i2c_write_byte(_sda,_scl,_freq,(a<<1))){i2c_stop(_sda,_scl,_freq);return false;}
+    for(size_t i=0;i<n;i++){if(!i2c_write_byte(_sda,_scl,_freq,d[i])){i2c_stop(_sda,_scl,_freq);return false;}}
+    if(s)i2c_stop(_sda,_scl,_freq);return true;
+}
+bool PIO_I2C::read(uint8_t a,uint8_t*d,size_t n,bool s){
+    if(!_initialized||n==0)return false;
+    i2c_start(_sda,_scl,_freq);
+    if(!i2c_write_byte(_sda,_scl,_freq,(a<<1)|1)){i2c_stop(_sda,_scl,_freq);return false;}
+    for(size_t i=0;i<n;i++)d[i]=i2c_read_byte(_sda,_scl,_freq,(i==n-1));
+    if(s)i2c_stop(_sda,_scl,_freq);return true;
+}
+bool PIO_I2C::writeThenRead(uint8_t a,const uint8_t*wd,size_t wl,uint8_t*rd,size_t rl){
+    if(!_initialized)return false;
+    if(wl>0){i2c_start(_sda,_scl,_freq);if(!i2c_write_byte(_sda,_scl,_freq,(a<<1))){i2c_stop(_sda,_scl,_freq);return false;}for(size_t i=0;i<wl;i++){if(!i2c_write_byte(_sda,_scl,_freq,wd[i])){i2c_stop(_sda,_scl,_freq);return false;}}i2c_stop(_sda,_scl,_freq);}
+    if(rl>0){i2c_start(_sda,_scl,_freq);if(!i2c_write_byte(_sda,_scl,_freq,(a<<1)|1)){i2c_stop(_sda,_scl,_freq);return false;}for(size_t i=0;i<rl;i++)rd[i]=i2c_read_byte(_sda,_scl,_freq,(i==rl-1));i2c_stop(_sda,_scl,_freq);}
     return true;
 }
-void PIO_I2C::_sendStop() { putCommand((1<<4)|(1<<3)); _waitRX(5000); readFIFO(); } // STOP cmd
-void PIO_I2C::_waitIdle() { while (!pio_sm_is_tx_fifo_empty(_pio, _sm)); }
-
-// Encoding helpers (LEFT shift):
-// Write data: cmd = (data << 6) | (1 << 5) | (stop << 4)
-// Read:       cmd = (1 << 14) | (1 << 12) | (stop << 11)
-// Address:    cmd = (addr_byte << 6) | (1 << 5)  (PIO in WRITE mode to send addr)
-
-// LEFT shift: after 2 outs, OSR[15]=c13; after 10 outs, OSR[15]=c5; after 11th out, OSR[15]=c4
-// Write: data at c[13:6], ACK release at c[4], STOP at c[3]
-// Read:  READ flag at c[14], SDA release at c[13], STOP at c[11]
-static inline uint16_t enc_write(uint8_t data, bool stop) {
-    return ((uint16_t)data << 6) | (1 << 4) | (stop ? (1 << 3) : 0);
-}
-static inline uint16_t enc_read(bool stop) {
-    return (1 << 14) | (1 << 13) | (stop ? (1 << 11) : 0);
-}
-static inline uint16_t enc_addr(uint8_t addr, bool read) {
-    uint8_t ab = (addr << 1) | (read ? 1 : 0);
-    return ((uint16_t)ab << 6) | (1 << 4); // PIO WRITE mode, ACK release
-}
-
-bool PIO_I2C::_sendAddress(uint8_t addr, bool read) {
-    putCommand(enc_addr(addr, read));
-    if (!_waitRX(5000)) return false;
-    return (uint8_t)readFIFO() == 0;
-}
-
-bool PIO_I2C::write(uint8_t addr, const uint8_t *data, size_t len, bool stop) {
-    if (!_initialized || len == 0) return false;
-    if (!_sendAddress(addr, false)) { _sendStop(); return false; }
-    for (size_t i = 0; i < len; i++) {
-        bool last = (i == len-1) && stop;
-        putCommand(enc_write(data[i], last));
-        if (!_waitRX(5000)) return false;
-        if ((uint8_t)readFIFO() != 0) { if (!last) _sendStop(); return false; }
-    }
-    return true;
-}
-
-bool PIO_I2C::read(uint8_t addr, uint8_t *data, size_t len, bool stop) {
-    if (!_initialized || len == 0) return false;
-    if (!_sendAddress(addr, true)) { _sendStop(); return false; }
-    for (size_t i = 0; i < len; i++) {
-        putCommand(enc_read((i == len-1) && stop));
-        if (!_waitRX(5000)) return false;
-        data[i] = (uint8_t)readFIFO();
-    }
-    return true;
-}
-
-bool PIO_I2C::writeThenRead(uint8_t addr, const uint8_t *wdata, size_t wlen,
-                             uint8_t *rdata, size_t rlen) {
-    if (!_initialized) return false;
-    if (wlen > 0) {
-        if (!_sendAddress(addr, false)) { _sendStop(); return false; }
-        for (size_t i = 0; i < wlen; i++) {
-            putCommand(enc_write(wdata[i], false));
-            if (!_waitRX(5000)) return false;
-            if ((uint8_t)readFIFO() != 0) { _sendStop(); return false; }
-        }
-        _sendStop(); // STOP between write and read (BMP280 needs this)
-    }
-    if (rlen > 0) {
-        if (!_sendAddress(addr, true)) { _sendStop(); return false; }
-        for (size_t i = 0; i < rlen; i++) {
-            putCommand(enc_read((i == rlen-1)));
-            if (!_waitRX(5000)) return false;
-            rdata[i] = (uint8_t)readFIFO();
-        }
-    }
-    return true;
-}
-
-void PIO_I2C::scan() {
-    if (!_initialized) return;
-    Serial.println("PIO I2C Scan:");
-    int found = 0;
-    for (int a = 1; a < 0x78; a++) {
-        putCommand(enc_addr(a, false));
-        if (_waitRX(5000) && (uint8_t)readFIFO() == 0) {
-            Serial.print("0x"); Serial.print(a, HEX); Serial.print(" "); found++;
-        }
-        putCommand(enc_write(0, true)); // STOP
-    }
-    Serial.print("("); Serial.print(found); Serial.println(" devices)");
+void PIO_I2C::scan(){
+    if(!_initialized)return;Serial.println("I2C Scan:");int f=0;
+    for(int a=1;a<0x78;a++){i2c_start(_sda,_scl,_freq);bool ack=i2c_write_byte(_sda,_scl,_freq,(a<<1));i2c_stop(_sda,_scl,_freq);if(ack){Serial.print("0x");Serial.print(a,HEX);Serial.print(" ");f++;}}
+    Serial.print("(");Serial.print(f);Serial.println(" devices)");
 }
