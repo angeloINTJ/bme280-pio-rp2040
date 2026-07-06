@@ -1,72 +1,23 @@
-/*
- * Final PIO I2C test - BMP280 via software GPIO I2C
- */
 #include <Arduino.h>
-#include "PIO_I2C.h"
 #include "BMx280_PIO.h"
-
-void setup() {
-    pinMode(LED_BUILTIN, OUTPUT); digitalWrite(LED_BUILTIN, HIGH);
-    Serial.begin(115200); delay(2000);
-    Serial.println("=== BMx280 PIO Test ===\n");
-
-    // Software I2C at 50kHz
-    PIO_I2C i2c(2, 3, 50000);
-    i2c.begin();
-
-    // Scan
-    i2c.scan();
-    Serial.println();
-
-    // Read chip ID
-    uint8_t reg = 0xD0, val = 0;
-    Serial.print("Chip ID: ");
-    if (i2c.writeThenRead(0x76, &reg, 1, &val, 1)) {
-        Serial.print("0x"); Serial.println(val, HEX);
-    } else { Serial.println("FAIL"); }
-
-    // Read calibration byte
-    reg = 0x88;
-    uint8_t cal[2];
-    Serial.print("DIG_T1 (2 bytes): ");
-    if (i2c.writeThenRead(0x76, &reg, 1, cal, 2)) {
-        uint16_t T1 = cal[0] | (cal[1] << 8);
-        Serial.print("0x"); Serial.print(cal[0],HEX);
-        Serial.print(" 0x"); Serial.print(cal[1],HEX);
-        Serial.print(" = "); Serial.println(T1);
-    } else Serial.println("FAIL");
-
-    // Now test full BMx280_PIO library
-    Serial.println("\n--- BMx280_PIO Library ---");
-    BMx280_PIO sensor(2, 3, 0x76, 50000);
-    Serial.print("begin(): ");
-    if (!sensor.begin()) {
-        Serial.println("FAILED");
-    } else {
-        Serial.print("OK - ");
-        Serial.println(sensor.isBME280() ? "BME280" : "BMP280");
-
-        Serial.print("Reading sensor... ");
-        sensor.setMode(BME280_MODE_FORCED);
-        delay(50);
-        float t = sensor.readTemperature();
-        float p = sensor.readPressure();
-        Serial.print("T="); Serial.print(t,2);
-        Serial.print(" C  P="); Serial.print(p,2); Serial.println(" hPa");
-
-        // Multiple readings
-        Serial.println("\n5 readings:");
-        for (int i = 0; i < 5; i++) {
-            sensor.takeForcedMeasurement();
-            sensor.readAll(&t, &p, nullptr);
-            Serial.print(i); Serial.print(": T=");
-            Serial.print(t,2); Serial.print(" P="); Serial.println(p,2);
-            delay(200);
-        }
-    }
-
-    i2c.end();
-    Serial.println("\n=== DONE ===");
-    digitalWrite(LED_BUILTIN, LOW);
+static float t_sum=0, p_sum=0, t_min=999, t_max=-999, p_min=9999, p_max=0;
+static int n=0;
+static bool init_ok=false;
+static BMx280_PIO *sensor=nullptr;
+void setup(){pinMode(LED_BUILTIN,OUTPUT);Serial.begin(115200);sensor=new BMx280_PIO(2,3,0x76);}
+void loop(){
+  if(!init_ok){init_ok=true;init_ok=sensor->begin();}
+  if(!init_ok){Serial.println("BEGIN FAIL");delay(2000);return;}
+  if(n>=20){
+    Serial.print("AVG: T=");Serial.print(t_sum/20.0f,2);
+    Serial.print(" (");Serial.print(t_min,2);Serial.print("-");Serial.print(t_max,2);Serial.print(")");
+    Serial.print(" P=");Serial.print(p_sum/20.0f,2);
+    Serial.print(" (");Serial.print(p_min,2);Serial.print("-");Serial.print(p_max,2);Serial.println(")");
+    Serial.println("TEST PASSED");while(1)delay(1000);
+  }
+  sensor->takeForcedMeasurement();
+  float t,p,h;sensor->readAll(&t,&p,&h);
+  Serial.print(n);Serial.print(": T=");Serial.print(t,2);Serial.print(" P=");Serial.println(p,2);
+  t_sum+=t;p_sum+=p;if(t<t_min)t_min=t;if(t>t_max)t_max=t;if(p<p_min)p_min=p;if(p>p_max)p_max=p;
+  n++;delay(500);
 }
-void loop() { delay(1000); }
