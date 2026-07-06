@@ -1,8 +1,9 @@
 {
-  "name": "BME280_PIO",
+  "name": "BMx280_PIO",
   "version": "1.0.0",
-  "description": "BME280 sensor driver using PIO-based I2C for Raspberry Pi Pico (RP2040). Reads temperature, humidity, and pressure via Programmable I/O without using the chip's hardware I2C peripherals.",
+  "description": "BMP280/BME280 sensor driver for Raspberry Pi Pico (RP2040). Supports both PIO-based I2C and hardware I2C (Wire). Auto-detects BMP280 vs BME280.",
   "keywords": [
+    "BMP280",
     "BME280",
     "RP2040",
     "PIO",

@@ -221,12 +221,36 @@ void PIO_I2C::end()
 
 void PIO_I2C::_waitIdle()
 {
-    // Wait for TX FIFO to drain (any pending command has been consumed)
+    // Wait for TX FIFO to drain with timeout
+    uint32_t start = micros();
     while (!pio_sm_is_tx_fifo_empty(_pio, _sm)) {
+        if (micros() - start > 5000) {
+            // Timeout: PIO SM is not consuming data.
+            // Drain TX FIFO manually and reset SM.
+            pio_sm_clear_fifos(_pio, _sm);
+            pio_sm_restart(_pio, _sm);
+            return;
+        }
         tight_loop_contents();
     }
     // Wait a bit for the last PIO operation to complete
     delayMicroseconds(2);
+}
+
+// Timeout helper: wait for RX FIFO with timeout in microseconds
+static bool _wait_rx_timeout(PIO pio, uint sm, uint32_t timeout_us) {
+    uint32_t start = micros();
+    while (pio_sm_is_rx_fifo_empty(pio, sm)) {
+        if (micros() - start > timeout_us) {
+            // Timeout: PIO SM is not responding.
+            // Clear FIFOs and reset SM to recover.
+            pio_sm_clear_fifos(pio, sm);
+            pio_sm_restart(pio, sm);
+            return false; // Timeout
+        }
+        tight_loop_contents();
+    }
+    return true;
 }
 
 bool PIO_I2C::_sendAddress(uint8_t addr, bool read)
@@ -243,8 +267,9 @@ bool PIO_I2C::_sendAddress(uint8_t addr, bool read)
     pio_sm_put_blocking(_pio, _sm, (uint32_t)cmd);
 
     // The PIO will send 8 bits, read ACK, and push the ACK to RX FIFO
-    while (pio_sm_is_rx_fifo_empty(_pio, _sm)) {
-        tight_loop_contents();
+    // I2C byte at 100kHz ≈ 90 µs; use 5ms timeout for safety
+    if (!_wait_rx_timeout(_pio, _sm, 5000)) {
+        return false; // Timeout — PIO not responding
     }
 
     uint8_t ack = (uint8_t)pio_sm_get(_pio, _sm);
@@ -294,9 +319,10 @@ bool PIO_I2C::write(uint8_t addr, const uint8_t *data, size_t len, bool stop)
 
         pio_sm_put_blocking(_pio, _sm, (uint32_t)cmd);
 
-        // Wait for ACK result
-        while (pio_sm_is_rx_fifo_empty(_pio, _sm)) {
-            tight_loop_contents();
+        // Wait for ACK result with timeout
+        if (!_wait_rx_timeout(_pio, _sm, 5000)) {
+            if (!last) _sendStop();
+            return false;
         }
 
         uint8_t ack = (uint8_t)pio_sm_get(_pio, _sm);
@@ -335,9 +361,9 @@ bool PIO_I2C::read(uint8_t addr, uint8_t *data, size_t len, bool stop)
 
         pio_sm_put_blocking(_pio, _sm, (uint32_t)cmd);
 
-        // Wait for received data
-        while (pio_sm_is_rx_fifo_empty(_pio, _sm)) {
-            tight_loop_contents();
+        // Wait for received data with timeout
+        if (!_wait_rx_timeout(_pio, _sm, 5000)) {
+            return false;
         }
 
         data[i] = (uint8_t)pio_sm_get(_pio, _sm);
@@ -372,8 +398,9 @@ bool PIO_I2C::writeThenRead(uint8_t addr,
             uint16_t cmd = 0x0200 | (last ? 0x0100 : 0x0000);
             pio_sm_put_blocking(_pio, _sm, (uint32_t)cmd);
 
-            while (pio_sm_is_rx_fifo_empty(_pio, _sm)) {
-                tight_loop_contents();
+            if (!_wait_rx_timeout(_pio, _sm, 5000)) {
+                _sendStop();
+                return false;
             }
             readData[i] = (uint8_t)pio_sm_get(_pio, _sm);
         }
