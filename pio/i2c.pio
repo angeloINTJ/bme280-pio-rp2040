@@ -1,135 +1,68 @@
 ;
 ; i2c.pio - I2C Master Bit-Bang Program for RP2040 PIO
+; Based on pico-examples (github.com/raspberrypi/pico-examples)
 ;
-; Implements an I2C master controller using one PIO state machine.
-; Handles START, STOP, byte send/receive, and ACK/NACK at the bit level.
-;
-; Pin mapping (configured via pio_sm_config):
-;   OUT pin 0       = SDA direction (0 = drive low, 1 = release / pull-up)
+; Pin mapping:
+;   OUT pin 0       = SDA direction (0 = drive low, 1 = release)
 ;   Side-set pin 0  = SCL level (0 = low, 1 = high)
-;   SET pin 0       = SDA direction (for set pindirs instruction)
-;   IN pin 0        = SDA input (for reading data/ACK)
+;   SET pin 0       = SDA direction (for set pindirs)
+;   IN pin 0        = SDA input
 ;
 ; Command word (16-bit, pushed to TX FIFO):
-;   Bits 7:0  = Data byte to send (ignored for READ operations)
-;   Bit  8    = LAST flag: 1 = generate STOP after this byte (final byte)
-;   Bit  9    = READ flag: 0 = write to slave, 1 = read from slave
-;
-; RX FIFO return:
-;   WRITE: 8-bit value where 0 = ACK received, non-zero = NACK
-;   READ:  8-bit data byte received from slave
-;
-; Usage from C/C++:
-;   1. Configure PIO with this program
-;   2. For each byte: push 16-bit command to TX FIFO
-;   3. Read result from RX FIFO
-;   4. The program handles START on first command, STOP on LAST flag
-;
-; To regenerate opcodes for inclusion in C code:
-;   pioasm -o c-sdk pio/i2c.pio i2c.pio.h
-;
+;   Bits 7:0  = Data byte (for WRITE)
+;   Bit  8    = READ flag  (1 = read from slave)
+;   Bit  9    = STOP flag  (1 = generate STOP after this byte)
 
 .program i2c_master
 .side_set 1 opt
 
-    ; Wait for a command word from the TX FIFO.
-    ; SCL is held high while idle (side 1).
     pull block          side 1
 
-    ; Generate START condition:
-    ; Set SDA low (output 0 to pindirs) while SCL is high.
+    ; START: SDA low while SCL high
     out pindirs, 1      side 1
 
-    ; Bring SCL low (side 0). This completes the START condition
-    ; and prepares for the first data bit.
-    out y, 1            side 0      ; Y = READ flag (bit 9 of command)
-    jmp !y, write_byte  side 0      ; If WRITE (Y=0), jump to write
+    ; READ/WRITE flag
+    out y, 1            side 0
+    jmp !y, write_byte  side 0
 
 read_byte:
-    ; For reads: the OSR may be empty after the OUT above.
-    ; The jmp !osre ensures we wait if needed.
-    jmp !osre, read_byte_ok side 0
-read_byte_ok:
-    set x, 7            side 0      ; X = 7 (8 iterations: 7..0)
-
+    set x, 7            side 0
 read_bit:
-    ; Raise SCL to allow slave to drive SDA.
-    ; Delay for timing.
     nop                 side 1 [1]
     nop                 side 1 [1]
-
-    ; Sample SDA into the ISR (shifted right-to-left).
     in pins, 1          side 1
-
-    ; Lower SCL. Delay for timing.
     nop                 side 0 [1]
     nop                 side 0 [1]
-
-    ; Loop for all 8 bits.
     jmp x--, read_bit   side 0
-
-    ; After reading 8 bits, the ISR contains the received byte.
-    ; Jump to check_stop (handles push and optional STOP).
     jmp check_stop      side 0
 
 write_byte:
-    ; Set loop counter for 8 bits (7 down to 0).
     set x, 7            side 0
-
 write_bit:
-    ; Output the next data bit (MSB first) from OSR to SDA direction.
-    ; Delay 1 extra PIO cycle for timing.
     out pindirs, 1      side 0 [1]
-
-    ; Raise SCL so the slave samples SDA.
     nop                 side 1 [1]
     nop                 side 1 [1]
-
-    ; Lower SCL. Slave changes SDA on falling edge (for next bit).
     nop                 side 0 [1]
     nop                 side 0 [1]
-
-    ; Loop for all 8 bits.
     jmp x--, write_bit  side 0
-
-    ; Release SDA (set pindirs to 1 = input/high-Z).
-    ; The slave will drive SDA low for ACK, or leave it high for NACK.
+    ; Read ACK
     set pindirs, 1      side 0 [1]
-
-    ; Raise SCL for the ACK clock pulse.
     nop                 side 1 [1]
-
-    ; Sample the ACK bit into the ISR.
+    nop                 side 1 [1]
     in pins, 1          side 1
-
-    ; Lower SCL.
     nop                 side 0 [1]
-
-    ; Push the ACK result (8 bits in ISR) to the RX FIFO
-    ; for the ARM core to read.
     push noblock        side 0
 
 check_stop:
-    ; Extract the LAST flag (bit 8 of the original command).
-    ; It was loaded into OSR bit 8 alongside the data/READ flag.
-    ; After the data bits were consumed (write) or not (read),
-    ; the LAST flag remains in OSR.
-    out y, 1            side 0      ; Y = LAST flag
-
-    ; If not the last byte, jump to done (skip STOP generation).
+    out y, 1            side 0
     jmp !y, done        side 0
-
-    ; Generate STOP condition:
-    ; SDA low → SCL high → SDA high (while SCL is high).
-    set pindirs, 1      side 0 [1]  ; SDA low
-    nop                 side 1 [1]  ; SCL high
-    nop                 side 1 [1]  ; Delay for setup time
-    ; Release SDA while SCL is high → STOP
-    set pindirs, 1      side 1 [1]  ; SDA high (released), SCL high
+    ; STOP: SDA low, SCL high, SDA high
+    set pindirs, 1      side 0 [1]
+    nop                 side 1 [1]
+    nop                 side 1 [1]
+    set pindirs, 1      side 1 [1]
 
 done:
-    ; Signal the ARM core that the operation is complete.
-    ; The program wraps back to the top (pull) for the next command.
-    irq nowait 0        side 1      ; SCL idle high
+    irq nowait 0        side 1
 
 .wrap
