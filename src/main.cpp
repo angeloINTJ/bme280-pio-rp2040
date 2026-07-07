@@ -29,7 +29,10 @@ uint8_t pio_read(PIO pio,int sm,uint8_t reg){
     channel_config_set_transfer_data_size(&tc,DMA_SIZE_32);channel_config_set_read_increment(&tc,true);channel_config_set_write_increment(&tc,false);
     channel_config_set_dreq(&tc,pio_get_dreq(pio,sm,true));dma_channel_configure(tx,&tc,&pio->txf[sm],cmds,2,false);
     pio_sm_set_enabled(pio,sm,true);dma_start_channel_mask((1u<<tx)|(1u<<rx));while(dma_channel_is_busy(rx))tight_loop_contents();pio_sm_set_enabled(pio,sm,false);
-    // CORRECTION: rev8 then shift right by 1 to undo spurious clock shift
+    // PIO ISR stores bits LSB-first (rev8 needed).
+    // The PIO still has a 1-cycle SCL pulse at out pindirs,1 side 1
+    // between commands, which the BME280 sees as an extra clock edge.
+    // >> 1 compensates for this remaining shift.
     uint8_t shifted=rev8(buf[1]&0xFF);
     uint8_t corrected=(shifted>>1)&0xFF;
     dma_channel_unclaim(tx);dma_channel_unclaim(rx);return corrected;

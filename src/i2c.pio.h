@@ -18,7 +18,7 @@
 
 static const uint16_t i2c_master_program_instructions[] = {
             //     .wrap_target
-    0x98a0, //  0: pull   block           side 1
+    0x90a0, //  0: pull   block           side 0
     0x7881, //  1: out    pindirs, 1      side 1
     0x7041, //  2: out    y, 1            side 0
     0x106c, //  3: jmp    !y, 12          side 0

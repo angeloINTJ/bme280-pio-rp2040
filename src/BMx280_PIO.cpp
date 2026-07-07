@@ -4,6 +4,14 @@
  */
 #include "BMx280_PIO.h"
 
+// Bit-reverse an 8-bit byte (I2C MSB-first → PIO ISR LSB-first correction)
+static uint8_t rev8(uint8_t b) {
+    b = (b & 0xF0) >> 4 | (b & 0x0F) << 4;
+    b = (b & 0xCC) >> 2 | (b & 0x33) << 2;
+    b = (b & 0xAA) >> 1 | (b & 0x55) << 1;
+    return b;
+}
+
 BMx280_PIO::BMx280_PIO(TwoWire &wire, uint8_t addr)
     : _transport(TRANSPORT_WIRE), _wire(&wire), _pio_i2c(nullptr), _addr(addr),
       _init(false), _is_bme(false),
@@ -232,14 +240,14 @@ void BMx280_PIO::readAllAsync(float *t, float *p, float *h) {
     // Note: For continuous multi-burst operation, the start offset
     // shifts each burst. A PIO IRQ handler should track the ring
     // write pointer for robust synchronization.
-    _raw_bytes[0] = _raw_async[3] & 0xFF;   // data byte 0
-    _raw_bytes[1] = _raw_async[4] & 0xFF;   // data byte 1
-    _raw_bytes[2] = _raw_async[5] & 0xFF;   // data byte 2
-    _raw_bytes[3] = _raw_async[6] & 0xFF;   // data byte 3
-    _raw_bytes[4] = _raw_async[7] & 0xFF;   // data byte 4
-    _raw_bytes[5] = _raw_async[0] & 0xFF;   // data byte 5 (wrapped)
-    _raw_bytes[6] = _raw_async[1] & 0xFF;   // data byte 6 (wrapped)
-    _raw_bytes[7] = _raw_async[2] & 0xFF;   // data byte 7 (wrapped)
+    _raw_bytes[0] = (rev8(_raw_async[3] & 0xFF) >> 1) & 0xFF;  // data byte 0
+    _raw_bytes[1] = (rev8(_raw_async[4] & 0xFF) >> 1) & 0xFF;  // data byte 1
+    _raw_bytes[2] = (rev8(_raw_async[5] & 0xFF) >> 1) & 0xFF;  // data byte 2
+    _raw_bytes[3] = (rev8(_raw_async[6] & 0xFF) >> 1) & 0xFF;  // data byte 3
+    _raw_bytes[4] = (rev8(_raw_async[7] & 0xFF) >> 1) & 0xFF;  // data byte 4
+    _raw_bytes[5] = (rev8(_raw_async[0] & 0xFF) >> 1) & 0xFF;  // data byte 5 (wrapped)
+    _raw_bytes[6] = (rev8(_raw_async[1] & 0xFF) >> 1) & 0xFF;  // data byte 6 (wrapped)
+    _raw_bytes[7] = (rev8(_raw_async[2] & 0xFF) >> 1) & 0xFF;  // data byte 7 (wrapped)
 
     int32_t aP = ((int32_t)_raw_bytes[0]<<12)|((int32_t)_raw_bytes[1]<<4)|(_raw_bytes[2]>>4);
     int32_t aT = ((int32_t)_raw_bytes[3]<<12)|((int32_t)_raw_bytes[4]<<4)|(_raw_bytes[5]>>4);
