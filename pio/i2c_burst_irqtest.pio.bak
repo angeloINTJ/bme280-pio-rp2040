@@ -1,0 +1,100 @@
+;
+; i2c_burst.pio - Transaction-Aware I2C Master (fits in 32 instructions)
+;
+; START is controlled by bit 15 of the command word. set pindirs is used
+; for START generation (no OSR consumption), keeping data bits (12:5)
+; at a fixed position regardless of START.
+;
+; No ACK checking on writes or reads — the BME280 reliably ACKs in
+; normal operation. This saves ~8 instructions and keeps us under the
+; 32-instruction RP2040 PIO limit.
+;
+; Pin mapping (same as i2c.pio):
+;   OUT pin 0  = SDA direction (1=drive low, 0=Hi-Z)
+;   SET pin 0  = SDA direction (same GPIO)
+;   Side-set 0 = SCL level (1=high, 0=low)
+;   IN pin 0   = SDA input
+;
+; Command word (16-bit, MSB-first shift):
+;   bit 15  = START (1=generate START)
+;   bit 14  = READ  (1=read from slave)
+;   bit 13  = STOP  (1=generate STOP)
+;   bits 12:5 = Data byte for WRITE (inverted: 1=drive SDA low)
+;   bits 4:0  = Unused
+;
+; RX FIFO: read bytes pushed explicitly via push noblock.
+; DMA RX transfers exactly N data bytes.
+;
+; I2C timing: tuned via PIO clock divider. With divider ≈ 100 at 125 MHz
+; system clock, PIO runs at 1.25 MHz (0.8 µs/cycle). The [3] delays give
+; appropriate SCL timing for 100 kHz I2C.
+
+.program i2c_burst
+.side_set 1 opt
+
+    ; ─── Main Loop ─────────────────────────────────────────────────────
+main_loop:
+    pull block          side 1     ; wait for command, SCL=high
+
+    ; Extract START flag (bit 15) and conditionally generate START
+    out y, 1            side 1     ; Y = START flag
+    jmp !y, no_start    side 1     ; START=0 → skip
+    ; START path: set pindirs,1 drives SDA low without consuming OSR
+    set pindirs, 1      side 1     ; SDA=low while SCL=high = START
+    jmp extract         side 0 [1] ; SCL=low, proceed
+no_start:
+    jmp extract         side 0     ; SCL=low (no START)
+
+    ; ─── Extract Flags ─────────────────────────────────────────────────
+extract:
+    out y, 1            side 0     ; Y = READ flag (bit 14)
+    out x, 1            side 0     ; X = STOP flag (bit 13), saved for later
+    jmp !y, write_byte  side 0     ; READ=0 → write path
+
+    ; ===================================================================
+    ; READ BYTE
+    ; ===================================================================
+read_byte:
+    set pindirs, 0      side 0     ; release SDA (Hi-Z)
+    set y, 7            side 0     ; Y = 7 (loop counter)
+read_bit:
+    nop                 side 1 [3] ; SCL high (slave puts data)
+    in pins, 1          side 1     ; sample SDA → ISR (autopush at 8 bits)
+    nop                 side 0 [3] ; SCL low
+    jmp y--, read_bit   side 0     ; loop 8 times
+    jmp !x, do_push   side 0     ; STOP=0 → done
+    ; STOP sequence: SDA low → SCL high → SDA high
+    set pindirs, 1      side 0 [1] ; drive SDA low
+    nop                 side 1 [3] ; SCL high
+    set pindirs, 0      side 1 [3] ; release SDA (STOP complete)
+do_push:
+    push noblock        side 0     ; push ISR to RX FIFO (byte received)
+read_done:
+    irq nowait 0        side 1     ; byte processed (SCL=high)
+
+    ; ===================================================================
+    ; WRITE BYTE
+    ; ===================================================================
+write_byte:
+    ; Save STOP flag from X to Y (X will be used as counter)
+    mov y, x            side 0     ; Y = STOP flag
+    set x, 7            side 0     ; X = 7 (loop counter)
+write_bit:
+    ; out pindirs shifts 1 bit OSR→pindirs. Data is inverted:
+    ;   bit=1 → pindirs=1 → drive SDA low → I2C "0"
+    ;   bit=0 → pindirs=0 → Hi-Z → pull-up → I2C "1"
+    out pindirs, 1      side 0 [1] ; data bit → SDA (bits 12:5 from OSR)
+    nop                 side 1 [3] ; SCL high (slave samples)
+    nop                 side 0 [3] ; SCL low
+    jmp x--, write_bit  side 0     ; loop 8 times
+
+    ; No ACK check — BME280 reliably ACKs. Jump to STOP handling.
+    jmp !y, write_done  side 0     ; STOP=0 → done
+    ; STOP sequence (same as read path)
+    set pindirs, 1      side 0 [1] ; drive SDA low
+    nop                 side 1 [3] ; SCL high
+    set pindirs, 0      side 1 [3] ; release SDA (STOP complete)
+write_done:
+    irq nowait 0        side 1     ; byte processed (SCL=high)
+
+.wrap

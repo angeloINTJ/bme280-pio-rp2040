@@ -1,0 +1,73 @@
+;
+; i2c_burst_irq.pio - I2C Master using IRQ for data signaling
+;
+; Instead of push noblock (which seems broken in complex programs),
+; this version fires IRQ0 after each read byte. The CPU ISR or
+; poll loop reads the ISR directly via pio_sm_get().
+;
+; This trades some CPU overhead for reliability.
+;
+.program i2c_burst_irq
+.side_set 1 opt
+
+    set x, 0            side 1     ; idle state
+
+main_loop:
+    pull block          side 1
+
+    ; Extract START flag (bit 31)
+    out y, 1            side 1     ; Y = START flag
+    jmp !y, no_start    side 1
+do_start:
+    mov x, !null        side 1     ; X = active
+    set pindirs, 1      side 1     ; START: SDA low while SCL high
+    nop                 side 0 [1] ; SCL low
+    jmp extract         side 0
+
+no_start:
+    jmp !x, do_start    side 1     ; idle → force START
+    nop                 side 0     ; SCL low
+
+extract:
+    out y, 1            side 0     ; Y = READ flag (bit 30)
+    out x, 1            side 0     ; X = STOP flag (bit 29), saved
+    jmp !y, write_byte  side 0     ; READ=0 → write
+
+read_byte:
+    out null, 9         side 0     ; consume bits 28:20 (OSR alignment)
+    set pindirs, 0      side 0     ; release SDA
+    set y, 7            side 0     ; counter
+read_bit:
+    nop                 side 1 [3] ; SCL high
+    in pins, 1          side 1     ; sample SDA
+    nop                 side 0 [3] ; SCL low
+    jmp y--, read_bit   side 0     ; loop 8 times
+
+    ; Signal CPU that ISR has data (IRQ 0)
+    irq nowait 0        side 0     ; CPU reads ISR via pio_sm_get()
+
+    ; Check STOP
+    jmp !x, read_done   side 0     ; STOP=0 → done
+    set pindirs, 1      side 0 [1] ; STOP: drive SDA low
+    nop                 side 1 [3] ; SCL high
+    set pindirs, 0      side 1 [3] ; release SDA
+read_done:
+    irq nowait 0        side 1     ; byte done (SCL=high)
+
+write_byte:
+    mov y, x            side 0     ; Y = STOP (saved)
+    set x, 7            side 0     ; counter
+write_bit:
+    out pindirs, 1      side 0 [1] ; data bit
+    nop                 side 1 [3] ; SCL high
+    nop                 side 0 [3] ; SCL low
+    jmp x--, write_bit  side 0     ; loop 8 times
+    ; No ACK check
+    jmp !y, write_done  side 0     ; STOP=0 → done
+    set pindirs, 1      side 0 [1] ; STOP
+    nop                 side 1 [3]
+    set pindirs, 0      side 1 [3]
+write_done:
+    irq nowait 0        side 1     ; byte done
+
+.wrap
