@@ -36,22 +36,22 @@
     {
       "name": "Basic Reading",
       "base": "examples/basic_reading",
-      "files": ["basic_reading.cpp"]
+      "files": ["basic_reading.ino"]
     },
     {
       "name": "Forced Mode",
       "base": "examples/forced_mode",
-      "files": ["forced_mode.cpp"]
+      "files": ["forced_mode.ino"]
     },
     {
       "name": "PIO+DMA Auto-Scan",
       "base": "examples/auto_scan",
-      "files": ["auto_scan.cpp"]
+      "files": ["auto_scan.ino"]
     },
     {
       "name": "PIO+DMA Hybrid Test",
       "base": "examples/pio_dma_hybrid",
-      "files": ["pio_dma_hybrid.cpp"]
+      "files": ["pio_dma_hybrid.ino"]
     }
   ],
   "dependencies": {
