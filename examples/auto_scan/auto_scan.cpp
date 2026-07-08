@@ -1,6 +1,11 @@
 /*
  * PIO+DMA Auto-Scan Example for BMx280PIO_RP2040
  *
+ * ⚠️ EXPERIMENTAL — The DMA ring buffer extraction is not yet fully
+ * validated on hardware. Use basic_reading or forced_mode for
+ * production. This example demonstrates the architecture and
+ * compiles correctly, but readAllAsync() returns incorrect data.
+ *
  * Demonstrates zero-CPU-overhead continuous sampling using the
  * 3-channel DMA engine (TX + RX + CTRL pacer).
  *
