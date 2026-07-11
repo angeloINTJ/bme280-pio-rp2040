@@ -53,6 +53,11 @@
       "name": "PIO+DMA Hybrid Test",
       "base": "examples/pio_dma_hybrid",
       "files": ["pio_dma_hybrid.ino"]
+    },
+    {
+      "name": "Multi Sensor",
+      "base": "examples/multi_sensor",
+      "files": ["multi_sensor.ino"]
     }
   ],
   "dependencies": {

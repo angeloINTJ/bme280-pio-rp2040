@@ -188,13 +188,27 @@ void PIO_I2C::_setupPacer() {
                           _ctrl_data, 0xFFFFFFFF, false);
 }
 
+// Static cache: offset of the i2c_master program in each PIO block.
+// The earlephilhower PIO allocator doesn't detect duplicate programs,
+// so the first instance loads normally and caches the offset; subsequent
+// instances reuse it instead of failing on PICO_ERROR_INSUFFICIENT_RESOURCES.
+static int _shared_i2c_offset[2] = {-1, -1};
+
 bool PIO_I2C::beginPIO(PIO pio) {
     if (_pio_active) return true;
     if (!_initialized) return false;
     _pio = pio;
-    if (!pio_can_add_program(_pio, &i2c_master_program)) return false;
-    _offset = pio_add_program(_pio, &i2c_master_program);
-    if (_offset < 0) return false;
+    uint pio_idx = pio_get_index(_pio);
+
+    if (_shared_i2c_offset[pio_idx] >= 0) {
+        // Program already loaded by another instance — reuse its offset
+        _offset = _shared_i2c_offset[pio_idx];
+    } else {
+        // First instance on this PIO block — load the program normally
+        _offset = pio_add_program(_pio, &i2c_master_program);
+        if (_offset < 0) return false;
+        _shared_i2c_offset[pio_idx] = _offset;
+    }
     int sm = pio_claim_unused_sm(_pio, false);
     if (sm < 0) { pio_remove_program(_pio, &i2c_master_program, _offset); _offset = -1; return false; }
     _sm = sm;
