@@ -53,8 +53,8 @@ bool BMx280PIO_RP2040::_i2c_read(uint8_t reg, uint8_t *data, size_t len) {    if
         // Fast path: PIO+DMA burstRead for up to 8 bytes
         if (len <= 8 && _wirepio->burstRead(_addr, reg, data, len) == len)
             return true;
-        // GPIO fallback for longer reads or if burstRead unavailable
-        uint8_t sd = _sda, sc = _scl; uint32_t f = _freq;
+        // GPIO fallback: always use 100 kHz for reliable timing
+        uint8_t sd = _sda, sc = _scl; uint32_t f = 100000; // safe GPIO speed
         for (size_t i = 0; i < len; i++) {
             gpio_init(sd); gpio_set_dir(sd, GPIO_IN); gpio_pull_up(sd);
             gpio_init(sc); gpio_set_dir(sc, GPIO_OUT); gpio_put(sc, 1);
