@@ -46,8 +46,7 @@ BMx280PIO_RP2040 sensor(2, 3);
 
 void setup() {
     Serial.begin(115200);
-    sensor.begin();
-    sensor.beginPIO(pio0);  // Load PIO program — enables burst reads
+    sensor.begin();    // begin() initializes WirePIO with PIO+DMA internally
 }
 void loop() {
     sensor.takeForcedMeasurement();
@@ -78,39 +77,26 @@ Tested on BMP280 (chip ID 0x58) at address 0x76, GPIO2=SDA, GPIO3=SCL.
 | **PIO+DMA burst** | **18.15°C** | **1017.17 hPa** | **Exact match** |
 | Hybrid PIO+GPIO | 18.15°C | 1017.17 hPa | Per-register PIO reads |
 
-All four examples (`basic_reading`, `forced_mode`, `auto_scan`, `pio_dma_hybrid`) tested and working on hardware.
+All examples (`basic_reading`, `forced_mode`, `auto_scan`, `multi_sensor`, `standalone_test`) tested and working on hardware.
 
 ## Architecture
 
 ```
 ┌────────────────────────────────────────────────────────────┐
-│  BMx280PIO_RP2040 (sensor driver)                                │
+│  BMx280PIO_RP2040 (sensor driver)                          │
 │  - Bosch compensation formulas                             │
 │  - Auto-detection BMP280 vs BME280                         │
-│  - readAllAsync() — pure math on DMA ring buffer           │
 └──────────────┬─────────────────────────────────────────────┘
                │
 ┌──────────────▼─────────────────────────────────────────────┐
-│  PIO_I2C (I2C transport)                                   │
-│  - GPIO bit-bang: writeThenRead() for config/init          │
-│  - PIO+DMA burst: beginAutoScan() for continuous reads     │
-│  - 3-channel DMA engine: TX, RX, CTRL (pacer)             │
+│  WirePIO (I2C transport)                                   │
+│  - GPIO bit-bang I2C on any pin pair                       │
+│  - PIO+DMA burst reads: 8 registers in one transaction     │
+│  - 2-channel DMA engine: TX (cmd → PIO), RX (PIO → buf)   │
 └──────────────┬─────────────────────────────────────────────┘
                │
 ┌──────────────▼─────────────────────────────────────────────┐
-│  DMA Engine (zero-CPU-overhead)                            │
-│                                                            │
-│  CH1 (TX):  cmd_buf[] ──► PIO TX FIFO (DREQ_PIO_TX)       │
-│  CH2 (RX):  PIO RX FIFO ──► raw_data[11] (ring buffer)    │
-│  CH3 (Pacer): PWM wrap ──► writes CH1 aliases (restart)   │
-│                                                            │
-│  PWM slice 7 provides periodic trigger for CH3.            │
-│  CH3 writes to CH1's AL3_TRANSFER_COUNT + AL3_READ_ADDR    │
-│  aliases, restarting the burst each period.                │
-└──────────────┬─────────────────────────────────────────────┘
-               │
-┌──────────────▼─────────────────────────────────────────────┐
-│  PIO State Machine (i2c.pio — 32 instructions)             │
+│  PIO State Machine (i2c.pio — 31 instructions)             │
 │  - Bit-bang I2C master (SCL via side-set, SDA via OUT/SET) │
 │  - Command word: START + READ + 8-bit data + STOP          │
 │  - Autopush RX data to FIFO at 8-bit threshold             │
@@ -118,14 +104,14 @@ All four examples (`basic_reading`, `forced_mode`, `auto_scan`, `pio_dma_hybrid`
 └────────────────────────────────────────────────────────────┘
 ```
 
-### PIO+DMA Burst Read (`burstRead`)
+### PIO+DMA Burst Read
 
-When PIO is loaded via `beginPIO()`, the library routes `_i2c_read()` through
-`PIO_I2C::burstRead()`, which executes a complete I2C burst transaction:
+When PIO is loaded via `beginPIO()`, read operations use WirePIO's
+PIO+DMA burst engine, which executes a complete I2C burst transaction:
 
-1. DMA CH1 sends 11 command words to the PIO TX FIFO
+1. DMA CH1 sends command words to the PIO TX FIFO
 2. The PIO processes: START + write register + RESTART + read 8 bytes
-3. DMA CH2 drains the 8 data bytes from the RX FIFO into a buffer
+3. DMA CH2 drains the data bytes from the RX FIFO into a buffer
 4. The CPU extracts the bytes and runs Bosch compensation
 
 Key implementation details:
@@ -133,25 +119,6 @@ Key implementation details:
 - **DMA enable after PIO SM start** — ensures DREQ signals are active
 - **ACK pulse with SDA setup time** — 3-instruction sequence drives SDA LOW before SCL rises
 - **PIO prologue restructured** — START/READ flags extracted via `out y/x` before any SCL edge, eliminating glitches
-
-### DMA CH3 Pacer (Continuous Auto-Scan) — Experimental
-
-The pacer architecture enables zero-CPU background sampling:
-(This mode is implemented but not yet validated on hardware.)
-
-```
-PWM slice 7 (wrap) ──DREQ──► DMA CH3 ──write──► CH1 alias registers
-                                 │
-                    ctrl_data[] (2-word ring buffer)
-                    [0] = transfer_count
-                    [1] = source_address
-```
-
-Each PWM period triggers **2 sequential CH3 transfers**:
-1. Write `_cmd_count` → CH1.`AL3_TRANSFER_COUNT` (reset count, no trigger)
-2. Write `_cmd_buf` address → CH1.`AL3_READ_ADDR_TRIG` (reset addr + **trigger CH1**)
-
-The write-side ring wraps within the 2 CH1 alias registers (8 bytes). CH1 then sends `_cmd_count` command words to the PIO TX FIFO, the PIO executes the I2C burst, and CH2 drains the RX FIFO into the ring buffer. The CPU only calls `readAllAsync()` when it needs fresh data.
 
 ## PIO Program — Key Design Decisions
 
@@ -239,13 +206,10 @@ float readHumidity();            // % (0 if BMP280)
 void  readAll(float *t, float *p, float *h);
 ```
 
-### PIO+DMA Auto-Scan (zero-CPU-overhead)
+### PIO+DMA (zero-CPU-overhead burst reads)
 
 ```cpp
-bool beginPIO(PIO pio = pio0);   // Load PIO program
-bool beginAutoScan(uint32_t period_ms = 1000);  // Start continuous DMA
-void stopAutoScan();             // Stop DMA, release channels
-void readAllAsync(float *t, float *p, float *h);  // Read from ring buffer
+bool beginPIO(PIO pio = pio0);   // Load PIO program, enable burst reads
 ```
 
 ### Utilities
@@ -266,13 +230,13 @@ bool isInitialized();            // True if sensor ready
 
 ## Known Limitations
 
-1. **DMA CH3 Pacer (continuous auto-scan)**: Architecture implemented but not yet
-   validated on hardware. The `beginAutoScan()` + `readAllAsync()` path compiles
-   correctly but data extraction from the continuous ring buffer needs validation.
-2. **STOP after reads**: The READ path reads the STOP flag from the wrong OSR bit
-   position. The GPIO recovery in `burstRead()` handles bus cleanup.
-3. **First reading offset**: The first byte of the first reading after forced mode
-   may have a slightly offset pressure MSB. This is a sensor characteristic.
+1. **STOP after reads**: The READ path reads the STOP flag from the wrong OSR bit
+   position (bit 3 instead of bit 10). The GPIO recovery in `burstRead()` handles bus cleanup.
+2. **First reading offset**: The first byte of the first reading after forced mode
+   may have a slightly offset pressure MSB. This is a sensor characteristic, not a driver bug — subsequent readings are stable.
+3. **Ring buffer wrap** in burst mode: the DMA CH2 ring buffer (32 bytes) wraps after
+   8 words. The 11-word burst (3 ACKs + 8 data bytes) wraps the last 3 words to
+   positions 0-2. The extraction code handles this correctly.
 4. **RP2040-only**: Requires the PIO peripheral, exclusive to RP2040/RP2350.
 
 ## Technical Notes
@@ -289,16 +253,10 @@ With PIO clock divider ≈ 96.15 (125 MHz sysclk ÷ 1.3 MHz PIO clock):
 
 The timing is conservative (slower than max spec) for robust operation. The BME280 tolerates the slower clock transparently.
 
-### Known Limitations
-
-1. **First reading after forced mode** may have slightly offset pressure MSB. This is a sensor characteristic, not a driver bug — subsequent readings are stable.
-2. **READ path STOP flag** is read from wrong OSR bit position (bit 3 instead of bit 10). STOP is not generated after reads. The GPIO recovery pulse handles bus cleanup. A full fix requires PIO restructuring beyond 32-instruction limit.
-3. **Ring buffer wrap** in auto-scan mode: the CH2 ring buffer (32 bytes) wraps after 8 words. The 11-word burst (3 ACKs + 8 data bytes) wraps the last 3 words to positions 0-2. `readAllAsync()` handles this correctly.
-
 ## Dependencies
 
+- **[WirePIO](https://github.com/angeloINTJ/TwoWirePIO_RP2040) (>=1.3.2)** — PIO+DMA I2C transport layer (installed automatically by Library Manager)
 - [arduino-pico](https://github.com/earlephilhower/arduino-pico) — Arduino core for RP2040 (Earle Philhower)
-- PlatformIO platform `raspberrypi` or Arduino IDE with RP2040 package
 
 ## License
 

@@ -52,6 +52,11 @@
       "name": "Multi Sensor",
       "base": "examples/multi_sensor",
       "files": ["multi_sensor.ino"]
+    },
+    {
+      "name": "Standalone Test",
+      "base": "examples/standalone_test",
+      "files": ["standalone_test.ino"]
     }
   ],
   "dependencies": {

@@ -2,8 +2,8 @@
  * @file BMx280PIO_RP2040.h
  * @brief BMP280/BME280 sensor driver for RP2040 — I2C via WirePIO or hardware Wire.
  *
- * Auto-detects BMP280 vs BME280 by chip ID. Uses TwoWirePIO_RP2040 (WirePIO)
- * for PIO+DMA I2C on any GPIO pin pair, or hardware I2C via TwoWire&.
+ * Auto-detects BMP280 vs BME280 by chip ID. Uses WirePIO for PIO+DMA
+ * I2C on any GPIO pin pair, or hardware I2C via TwoWire&.
  *
  * @author angeloINTJ
  * @license MIT
@@ -43,7 +43,10 @@ class WirePIO;
 #define BME280_OS_16X           0x05
 
 #define BME280_FILTER_OFF       0x00
+#define BME280_FILTER_2         0x01
 #define BME280_FILTER_4         0x02
+#define BME280_FILTER_8         0x03
+#define BME280_FILTER_16        0x04
 #define BME280_STANDBY_250MS    0x03
 #define BME280_STANDBY_500MS    0x04
 #define BME280_STANDBY_1000MS   0x05

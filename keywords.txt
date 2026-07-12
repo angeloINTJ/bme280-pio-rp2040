@@ -2,12 +2,9 @@
 # See: https://arduino.github.io/arduino-cli/latest/library-specification/#keywords
 
 BMx280PIO_RP2040	KEYWORD1
-PIO_I2C	KEYWORD1
 
 begin	KEYWORD2
 beginPIO	KEYWORD2
-beginAutoScan	KEYWORD2
-stopAutoScan	KEYWORD2
 setMode	KEYWORD2
 takeForcedMeasurement	KEYWORD2
 setTemperatureOversampling	KEYWORD2
@@ -19,15 +16,12 @@ readTemperature	KEYWORD2
 readPressure	KEYWORD2
 readHumidity	KEYWORD2
 readAll	KEYWORD2
-readAllAsync	KEYWORD2
 readRegister	KEYWORD2
 writeRegister	KEYWORD2
 readRegisters	KEYWORD2
 getChipID	KEYWORD2
 isBME280	KEYWORD2
 isInitialized	KEYWORD2
-scan	KEYWORD2
-extractBytes	KEYWORD2
 
 BME280_ADDR_PRIMARY	LITERAL1
 BME280_ADDR_SECONDARY	LITERAL1

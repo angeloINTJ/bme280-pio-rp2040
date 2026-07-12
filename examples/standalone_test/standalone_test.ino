@@ -11,7 +11,7 @@
  * Output: Serial Monitor at 115200 baud.
  */
 
-#include <BMx280PIO_RP2040.h>
+#include "BMx280PIO_RP2040.h"
 
 BMx280PIO_RP2040 bme(4, 5);
 
