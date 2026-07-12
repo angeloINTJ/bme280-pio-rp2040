@@ -49,11 +49,11 @@ bool BMx280PIO_RP2040::_i2c_write(uint8_t reg, const uint8_t *data, size_t len) 
     }
 }
 
-bool BMx280PIO_RP2040::_i2c_read(uint8_t reg, uint8_t *data, size_t len) {
-    if (_wirepio) {
-        // Read one byte at a time via raw GPIO. Multi-byte bursts fail
-        // after ~2 bytes due to ACK timing; single-byte reads are reliable.
-        // WirePIO handles writes only.
+bool BMx280PIO_RP2040::_i2c_read(uint8_t reg, uint8_t *data, size_t len) {    if (_wirepio) {
+        // Fast path: PIO+DMA burstRead for up to 8 bytes
+        if (len <= 8 && _wirepio->burstRead(_addr, reg, data, len) == len)
+            return true;
+        // GPIO fallback for longer reads or if burstRead unavailable
         uint8_t sd = _sda, sc = _scl; uint32_t f = _freq;
         for (size_t i = 0; i < len; i++) {
             gpio_init(sd); gpio_set_dir(sd, GPIO_IN); gpio_pull_up(sd);

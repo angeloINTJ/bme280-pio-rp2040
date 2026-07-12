@@ -55,7 +55,6 @@
     }
   ],
   "dependencies": {
-    "earlephilhower/arduino-pico": "^4.0.0",
     "https://github.com/angeloINTJ/TwoWirePIO_RP2040.git": "^1.1.0"
   }
 }
