@@ -1,5 +1,6 @@
 /**
  * @example BMx280PIO_RP2040 vs Adafruit BMP280 — Dual-Core Stress Benchmark
+ * @author Ângelo Moisés Alves (@angeloINTJ)
  *
  * Compara 3 modos de transporte I2C com ambos os núcleos sob carga matemática:
  *   1. PIO+DMA  (burstRead) — WirePIO @ 200 kHz

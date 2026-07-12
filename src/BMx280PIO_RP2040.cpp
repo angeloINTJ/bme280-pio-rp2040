@@ -1,3 +1,9 @@
+/**
+ * @file BMx280PIO_RP2040.cpp
+ * @brief BMP280/BME280 sensor driver implementation for RP2040.
+ * @author Ângelo Moisés Alves (@angeloINTJ)
+ * @license MIT
+ */
 #include "BMx280PIO_RP2040.h"
 #include <WirePIO.h>
 #include <hardware/gpio.h>
