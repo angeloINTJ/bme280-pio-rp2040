@@ -52,7 +52,7 @@ class BMx280PIO_RP2040 {
 public:
     BMx280PIO_RP2040(TwoWire &wire, uint8_t addr = BME280_ADDR_PRIMARY);
     BMx280PIO_RP2040(uint8_t sda, uint8_t scl, uint8_t addr = BME280_ADDR_PRIMARY,
-                     uint32_t freq = 200000, PIO pio = pio0);
+                     uint32_t freq = 400000, PIO pio = pio0);
     ~BMx280PIO_RP2040();
 
     bool begin();
