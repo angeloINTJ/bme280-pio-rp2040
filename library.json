@@ -1,7 +1,7 @@
 {
   "name": "BMx280PIO_RP2040",
   "version": "1.1.0",
-  "description": "BMP280/BME280 sensor driver for Raspberry Pi Pico (RP2040). Supports both PIO-based I2C and hardware I2C (Wire). Auto-detects BMP280 vs BME280.",
+  "description": "BMP280/BME280 sensor driver for Raspberry Pi Pico (RP2040). Uses TwoWirePIO_RP2040 (WirePIO) for PIO+DMA I2C on any GPIO pins. Also supports hardware I2C (Wire). Auto-detects BMP280 vs BME280.",
   "keywords": [
     "BMP280",
     "BME280",
@@ -30,8 +30,7 @@
   "frameworks": "arduino",
   "platforms": "raspberrypi",
   "headers": [
-    "BMx280PIO_RP2040.h",
-    "PIO_I2C.h"
+    "BMx280PIO_RP2040.h"
   ],
   "examples": [
     {
@@ -50,17 +49,13 @@
       "files": ["auto_scan.ino"]
     },
     {
-      "name": "PIO+DMA Hybrid Test",
-      "base": "examples/pio_dma_hybrid",
-      "files": ["pio_dma_hybrid.ino"]
-    },
-    {
       "name": "Multi Sensor",
       "base": "examples/multi_sensor",
       "files": ["multi_sensor.ino"]
     }
   ],
   "dependencies": {
-    "earlephilhower/arduino-pico": "^4.0.0"
+    "earlephilhower/arduino-pico": "^4.0.0",
+    "https://github.com/angeloINTJ/TwoWirePIO_RP2040.git": "^1.1.0"
   }
 }

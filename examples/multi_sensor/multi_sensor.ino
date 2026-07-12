@@ -2,16 +2,16 @@
  * @example Multi-Sensor PIO+DMA Example for BMx280PIO_RP2040
  * @brief
  * Reads two BMP280 sensors simultaneously using PIO+DMA burst transfers
- * on independent I2C buses. Each sensor gets its own PIO state machine
- * and DMA channels — zero CPU overhead during I2C reads.
+ * on independent I2C buses. Each sensor creates its own internal WirePIO
+ * instance — zero CPU overhead during I2C reads.
  *
  * PIO Resource Usage:
  *   - PIO block:   pio0 (both sensors share the same program)
  *   - State machines: pio0 SM0 (sensor 1), pio0 SM1 (sensor 2)
- *   - DMA channels:  CH0/1/2 (sensor 1 TX/RX/CTRL), CH3/4/5 (sensor 2 TX/RX/CTRL)
- *   - Total: 2 of 8 SMs, 6 of 12 DMA channels
+ *   - DMA channels:  4 of 12 (2 per WirePIO bus)
+ *   - Total: 2 of 8 SMs, 4 of 12 DMA channels
  *
- * This leaves pio1 completely free for other libraries (WirePIO, CYW43 WiFi, etc.).
+ * This leaves pio1 completely free for other libraries (CYW43 WiFi, etc.).
  *
  * Pico W coexistence:
  *   WiFi uses pio1 (auto-selected by SDK). Both sensors stay on pio0,
@@ -26,8 +26,8 @@
  * Expected output (Serial Monitor, 115200 baud):
  *   BMx280 Multi-Sensor (PIO+DMA)
  *   ==============================
- *   Sensor 1 (GPIO4/5): BMP280 — pio0 SM0, DMA CH0/1/2
- *   Sensor 2 (GPIO6/7): BMP280 — pio0 SM1, DMA CH3/4/5
+ *   Sensor 1 (GPIO4/5): BMP280 — pio0
+ *   Sensor 2 (GPIO6/7): BMP280 — pio0
  *   pio1: completely free
  *   ──────────────────────────────
  *   Sensor 1 | T: 23.45 C | P: 1013.25 hPa | Alt: 0.00 m
@@ -46,7 +46,9 @@
 #define SDA2 6
 #define SCL2 7
 
-// Two independent sensor instances — each owns its own PIO_I2C bus
+// Each sensor creates its own internal WirePIO bus.
+// begin() handles GPIO + PIO+DMA initialization automatically.
+// Both use pio0 — WirePIO's static cache shares the i2c_master program.
 BMx280PIO_RP2040 sensor1(SDA1, SCL1);
 BMx280PIO_RP2040 sensor2(SDA2, SCL2);
 
@@ -70,20 +72,13 @@ void setup() {
     } else {
         Serial.print(sensor1.isBME280() ? "BME280" : "BMP280");
         Serial.print(" — Chip ID: 0x");
-        Serial.println(sensor1.getChipID(), HEX);
+        Serial.print(sensor1.getChipID(), HEX);
+        Serial.println(" — pio0 (PIO+DMA via WirePIO)");
 
-        // Apply configuration BEFORE loading PIO (writes use GPIO bit-bang)
         sensor1.setTemperatureOversampling(BME280_OS_2X);
         sensor1.setPressureOversampling(BME280_OS_4X);
         sensor1.setFilter(BME280_FILTER_4);
         sensor1.setMode(BME280_MODE_NORMAL);
-
-        // Load PIO program on pio0 SM0 — enables PIO+DMA burstRead()
-        if (!sensor1.beginPIO(pio0)) {
-            Serial.println("  ERROR: PIO load failed for Sensor 1!");
-        } else {
-            Serial.println("  PIO+DMA active — pio0 SM0, DMA CH0/1/2");
-        }
     }
 
     // ─── Initialize Sensor 2 ───────────────────────────────────────────
@@ -99,29 +94,20 @@ void setup() {
     } else {
         Serial.print(sensor2.isBME280() ? "BME280" : "BMP280");
         Serial.print(" — Chip ID: 0x");
-        Serial.println(sensor2.getChipID(), HEX);
+        Serial.print(sensor2.getChipID(), HEX);
+        Serial.println(" — pio0 (PIO+DMA via WirePIO)");
 
-        // Apply configuration BEFORE loading PIO
         sensor2.setTemperatureOversampling(BME280_OS_2X);
         sensor2.setPressureOversampling(BME280_OS_4X);
         sensor2.setFilter(BME280_FILTER_4);
         sensor2.setMode(BME280_MODE_NORMAL);
-
-        // Load PIO program on pio0 SM1 — same program, same offset as sensor 1
-        // pio_add_program() detects the program is already loaded and reuses
-        // the existing offset. Only a new state machine and DMA channels are claimed.
-        if (!sensor2.beginPIO(pio0)) {
-            Serial.println("  ERROR: PIO load failed for Sensor 2!");
-        } else {
-            Serial.println("  PIO+DMA active — pio0 SM1, DMA CH3/4/5");
-        }
     }
 
     Serial.println();
     Serial.println("PIO Resource Usage:");
     Serial.println("  pio0: SM0 (sensor 1) + SM1 (sensor 2) — 31 instr shared");
     Serial.println("  pio1: completely free for WirePIO, WiFi, etc.");
-    Serial.println("  DMA:  6 of 12 channels used (3 per sensor)");
+    Serial.println("  DMA:  4 of 12 channels used (2 per WirePIO bus)");
     Serial.println("──────────────────────────────");
     Serial.println("Ready.\n");
 }
@@ -130,10 +116,10 @@ void loop() {
     float t1, p1, h1;
     float t2, p2, h2;
 
-    // ─── Read Sensor 1 (PIO+DMA burst, then GPIO restored) ────────────
+    // ─── Read Sensor 1 (PIO+DMA burst via WirePIO) ────────────────────
     sensor1.readAll(&t1, &p1, &h1);
 
-    // ─── Read Sensor 2 (PIO+DMA burst, then GPIO restored) ────────────
+    // ─── Read Sensor 2 (PIO+DMA burst via WirePIO) ────────────────────
     sensor2.readAll(&t2, &p2, &h2);
 
     // ─── Output ────────────────────────────────────────────────────────

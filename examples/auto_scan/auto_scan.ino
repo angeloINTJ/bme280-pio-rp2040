@@ -1,9 +1,9 @@
 /**
- * @example PIO+DMA Auto-Scan Example for BMx280PIO_RP2040
+ * @example PIO+DMA Burst Read Example for BMx280PIO_RP2040
  * @brief
  * Demonstrates PIO+DMA burst reads for high-speed sensor readings.
- * Uses the RP2040 PIO state machine to handle I2C transactions
- * with DMA for zero-CPU data transfer.
+ * The internal WirePIO handles PIO+DMA automatically — no manual
+ * PIO setup needed. Uses Forced mode for low power.
  *
  * Wiring:
  *   Sensor VCC → 3.3V
@@ -31,11 +31,8 @@ void setup() {
     Serial.print("Sensor: ");
     Serial.println(bme.isBME280() ? "BME280" : "BMP280");
 
-    // Load PIO program — enables PIO+DMA transport via burstRead()
-    if (!bme.beginPIO(pio0)) {
-        Serial.println("ERROR: PIO load failed!");
-        while (1) delay(1000);
-    }
+    // begin() already initializes PIO+DMA via WirePIO internally.
+    // No separate beginPIO() call needed.
 
     bme.setTemperatureOversampling(BME280_OS_1X);
     bme.setPressureOversampling(BME280_OS_1X);
@@ -45,8 +42,7 @@ void setup() {
 }
 
 void loop() {
-    // Trigger measurement via GPIO, then read all registers
-    // via PIO+DMA burst (burstRead handles the I2C transaction)
+    // Trigger measurement, then read all registers
     if (!bme.takeForcedMeasurement()) {
         Serial.println("Measurement failed!");
         delay(1000);
@@ -54,9 +50,9 @@ void loop() {
     }
 
     float t, p, h;
-    bme.readAll(&t, &p, &h);  // Uses burstRead() when PIO is active
+    bme.readAll(&t, &p, &h);  // Uses PIO+DMA burst via WirePIO
 
-    Serial.print("T: "); Serial.print(t, 2); Serial.print(" °C");
+    Serial.print("T: "); Serial.print(t, 2); Serial.print(" C");
     Serial.print(" | P: "); Serial.print(p, 2); Serial.print(" hPa");
     if (bme.isBME280()) {
         Serial.print(" | H: "); Serial.print(h, 2); Serial.print(" %");

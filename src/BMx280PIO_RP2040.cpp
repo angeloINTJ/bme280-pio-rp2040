@@ -1,55 +1,85 @@
-/**
- * @file BMx280PIO_RP2040.cpp
- * @brief BMP280/BME280 sensor driver implementation.
- *
- * Bosch compensation formulas (double-precision pressure, integer temperature).
- * Supports GPIO bit-bang I2C, hardware Wire, and PIO+DMA burst reads.
- */
 #include "BMx280PIO_RP2040.h"
+#include "WirePIO.h"
+#include <hardware/gpio.h>
 
 BMx280PIO_RP2040::BMx280PIO_RP2040(TwoWire &wire, uint8_t addr)
-    : _transport(TRANSPORT_WIRE), _wire(&wire), _pio_i2c(nullptr), _addr(addr),
+    : _wire(&wire), _wirepio(nullptr), _addr(addr), _sda(0), _scl(0), _freq(100000),
       _init(false), _is_bme(false),
       _osrs_t(BME280_OS_1X), _osrs_p(BME280_OS_1X), _osrs_h(BME280_OS_1X),
       _filter(BME280_FILTER_OFF), _standby(BME280_STANDBY_250MS), _mode(BME280_MODE_SLEEP) {}
 
-BMx280PIO_RP2040::BMx280PIO_RP2040(uint8_t sda, uint8_t scl, uint8_t addr, uint32_t freq)
-    : _transport(TRANSPORT_PIO), _wire(nullptr), _pio_i2c(new PIO_I2C(sda, scl, freq)),
-      _addr(addr), _init(false), _is_bme(false),
+BMx280PIO_RP2040::BMx280PIO_RP2040(uint8_t sda, uint8_t scl, uint8_t addr, uint32_t freq, PIO pio)
+    : _wire(nullptr), _wirepio(new WirePIO(sda, scl, freq, pio)),
+      _addr(addr), _sda(sda), _scl(scl), _freq(freq),
+      _init(false), _is_bme(false),
       _osrs_t(BME280_OS_1X), _osrs_p(BME280_OS_1X), _osrs_h(BME280_OS_1X),
       _filter(BME280_FILTER_OFF), _standby(BME280_STANDBY_250MS), _mode(BME280_MODE_SLEEP) {}
 
-BMx280PIO_RP2040::~BMx280PIO_RP2040() { if (_pio_i2c) { _pio_i2c->end(); delete _pio_i2c; } }
+BMx280PIO_RP2040::~BMx280PIO_RP2040() {
+    if (_wirepio) { _wirepio->end(); delete _wirepio; }
+}
+
+static inline void dly(uint32_t f) { delayMicroseconds(500000 / f < 2 ? 2 : 500000 / f); }
+static inline void sl(uint p)    { gpio_set_dir(p, GPIO_OUT); gpio_put(p, 0); }
+static inline void sh(uint p)    { gpio_set_dir(p, GPIO_IN); }
+static inline bool sr(uint p)    { return gpio_get(p); }
+static inline void cl(uint p)    { gpio_put(p, 0); }
+static inline void ch(uint p)    { gpio_put(p, 1); }
+static void start(uint sd, uint sc, uint32_t f) { sl(sd); dly(f); cl(sc); dly(f); }
+static void stop(uint sd, uint sc, uint32_t f)  { sl(sd); dly(f); ch(sc); dly(f); sh(sd); dly(f); }
+static bool wr(uint sd, uint sc, uint32_t f, uint8_t b) {
+    for (uint8_t m = 0x80; m; m >>= 1) { if (b & m) sh(sd); else sl(sd); dly(f); ch(sc); dly(f); cl(sc); }
+    sh(sd); dly(f); ch(sc); dly(f); bool a = !sr(sd); cl(sc); dly(f); return a;
+}
+static uint8_t rd(uint sd, uint sc, uint32_t f, bool last) {
+    uint8_t v = 0; sh(sd);
+    for (int i = 0; i < 8; i++) { ch(sc); dly(f); v = (v << 1) | (sr(sd) ? 1 : 0); cl(sc); dly(f); }
+    last ? sh(sd) : sl(sd); dly(f); ch(sc); dly(f); cl(sc); dly(f); sh(sd); return v;
+}
 
 bool BMx280PIO_RP2040::_i2c_write(uint8_t reg, const uint8_t *data, size_t len) {
-    if (_transport == TRANSPORT_WIRE) {
+    if (_wirepio) {
+        _wirepio->beginTransmission(_addr); _wirepio->write(reg);
+        for (size_t i = 0; i < len; i++) _wirepio->write(data[i]);
+        return _wirepio->endTransmission() == 0;
+    } else {
         _wire->beginTransmission(_addr); _wire->write(reg);
         for (size_t i = 0; i < len; i++) _wire->write(data[i]);
         return _wire->endTransmission() == 0;
-    } else {
-        uint8_t buf[len + 1]; buf[0] = reg;
-        for (size_t i = 0; i < len; i++) buf[i + 1] = data[i];
-        return _pio_i2c->write(_addr, buf, len + 1);
     }
 }
+
 bool BMx280PIO_RP2040::_i2c_read(uint8_t reg, uint8_t *data, size_t len) {
-    if (_transport == TRANSPORT_WIRE) {
+    if (_wirepio) {
+        // Use raw GPIO bit-bang for reads — proven to work with BMP280.
+        // WirePIO is used for writes only.
+        uint8_t sd = _sda, sc = _scl; uint32_t f = _freq;
+        gpio_init(sd); gpio_set_dir(sd, GPIO_IN); gpio_pull_up(sd);
+        gpio_init(sc); gpio_set_dir(sc, GPIO_OUT); gpio_put(sc, 1);
+        start(sd, sc, f);
+        if (!wr(sd, sc, f, (uint8_t)(_addr << 1))) { stop(sd, sc, f); return false; }
+        if (!wr(sd, sc, f, reg)) { stop(sd, sc, f); return false; }
+        stop(sd, sc, f);
+        start(sd, sc, f);
+        if (!wr(sd, sc, f, (uint8_t)((_addr << 1) | 1))) { stop(sd, sc, f); return false; }
+        for (size_t i = 0; i < len; i++) data[i] = rd(sd, sc, f, i == len - 1);
+        stop(sd, sc, f);
+        return true;
+    } else {
         _wire->beginTransmission(_addr); _wire->write(reg);
         if (_wire->endTransmission(false) != 0) return false;
-        _wire->requestFrom(_addr, len);
-        size_t n = _wire->available();
+        size_t n = _wire->requestFrom(_addr, len);
         for (size_t i = 0; i < n && i < len; i++) data[i] = _wire->read();
         return n == len;
-    } else if (_pio_i2c->isPIOActive()) {
-        return _pio_i2c->burstRead(_addr, reg, data, len);
-    } else {
-        return _pio_i2c->writeThenRead(_addr, &reg, 1, data, len);
     }
 }
 
 bool BMx280PIO_RP2040::begin() {
     if (_init) return true;
-    if (_transport == TRANSPORT_PIO && !_pio_i2c->begin()) return false;
+    if (_wirepio) {
+        _wirepio->begin();
+        if (!_wirepio->isRunning()) return false;
+    }
     uint8_t rst = BME280_RESET_VALUE;
     _i2c_write(BME280_REG_RESET, &rst, 1);
     sleep_ms(15);
@@ -60,6 +90,12 @@ bool BMx280PIO_RP2040::begin() {
     if (!_loadCalibration()) return false;
     _applyConfig();
     _init = true; return true;
+}
+
+bool BMx280PIO_RP2040::beginPIO(PIO pio) {
+    if (!_wirepio || !_init) return false;
+    _wirepio->end(); _wirepio->setPIO(pio); _wirepio->begin();
+    return _wirepio->isRunning();
 }
 
 bool BMx280PIO_RP2040::_loadCalibration() {
@@ -90,198 +126,82 @@ void BMx280PIO_RP2040::_applyConfig() {
 }
 
 void BMx280PIO_RP2040::setMode(uint8_t mode) {
-    _mode = mode & 0x03;
-    if (!_init) return;
+    _mode = mode & 0x03; if (!_init) return;
     uint8_t d; _i2c_read(BME280_REG_CTRL_MEAS, &d, 1);
-    d = (d & 0xFC) | (_mode & 0x03);
-    _i2c_write(BME280_REG_CTRL_MEAS, &d, 1);
+    d = (d & 0xFC) | (_mode & 0x03); _i2c_write(BME280_REG_CTRL_MEAS, &d, 1);
 }
 
-uint8_t BMx280PIO_RP2040::readRegister(uint8_t reg) {
-    uint8_t v = 0; _i2c_read(reg, &v, 1); return v;
-}
-void BMx280PIO_RP2040::writeRegister(uint8_t reg, uint8_t value) {
-    _i2c_write(reg, &value, 1);
-}
-void BMx280PIO_RP2040::readRegisters(uint8_t reg, uint8_t *data, size_t len) {
-    _i2c_read(reg, data, len);
-}
+uint8_t BMx280PIO_RP2040::readRegister(uint8_t r) { uint8_t v=0; _i2c_read(r,&v,1); return v; }
+void BMx280PIO_RP2040::writeRegister(uint8_t r, uint8_t v) { _i2c_write(r,&v,1); }
+void BMx280PIO_RP2040::readRegisters(uint8_t r, uint8_t *d, size_t n) { _i2c_read(r,d,n); }
 
 uint8_t BMx280PIO_RP2040::_measTime() {
-    const uint8_t m[] = {0, 1, 2, 4, 8, 16};
-    uint32_t t = 1250 + 2300 * m[_osrs_t & 0x07] + 2300 * m[_osrs_p & 0x07] + 575;
-    if (_is_bme) t += 2300 * m[_osrs_h & 0x07] + 575;
-    return (uint8_t)((t + 1500) / 1000);
+    const uint8_t m[] = {0,1,2,4,8,16};
+    uint32_t t = 1250 + 2300*m[_osrs_t&7] + 2300*m[_osrs_p&7] + 575;
+    if (_is_bme) t += 2300*m[_osrs_h&7] + 575;
+    return (uint8_t)((t+1500)/1000);
 }
 
 bool BMx280PIO_RP2040::takeForcedMeasurement() {
-    if (!_init) return false;
-    setMode(BME280_MODE_FORCED);
-    sleep_ms(_measTime());
-    uint32_t start = millis();
-    uint8_t st;
-    do {
-        if (!_i2c_read(BME280_REG_STATUS, &st, 1)) return false;
-        if (millis() - start > 100) return false;
-        sleep_ms(1);
-    } while (st & 0x08);
+    if (!_init) return false; setMode(BME280_MODE_FORCED); sleep_ms(_measTime());
+    uint32_t start = millis(); uint8_t st;
+    do { if (!_i2c_read(BME280_REG_STATUS,&st,1)) return false;
+         if (millis()-start>100) return false; sleep_ms(1); } while (st&0x08);
     return true;
 }
 
 void BMx280PIO_RP2040::_readRaw(int32_t *t, int32_t *p, int32_t *h) {
-    uint8_t d[8];
-    _i2c_read(BME280_REG_PRESS_MSB, d, 8);
-    if (p) *p = ((int32_t)d[0]<<12)|((int32_t)d[1]<<4)|(d[2]>>4);
-    if (t) *t = ((int32_t)d[3]<<12)|((int32_t)d[4]<<4)|(d[5]>>4);
-    if (h && _is_bme) *h = ((int32_t)d[6]<<8)|d[7];
-    else if (h) *h = 0;
+    uint8_t d[8]; _i2c_read(BME280_REG_PRESS_MSB, d, 8);
+    if(p)*p=((int32_t)d[0]<<12)|((int32_t)d[1]<<4)|(d[2]>>4);
+    if(t)*t=((int32_t)d[3]<<12)|((int32_t)d[4]<<4)|(d[5]>>4);
+    if(h&&_is_bme)*h=((int32_t)d[6]<<8)|d[7]; else if(h)*h=0;
 }
 
 float BMx280PIO_RP2040::readTemperature() {
-    if (!_init) return NAN;
-    int32_t adc_T; _readRaw(&adc_T, nullptr, nullptr);
-    int32_t v1 = ((((adc_T>>3)-((int32_t)_T1<<1)))*_T2)>>11;
-    int32_t v2 = (((((adc_T>>4)-_T1)*((adc_T>>4)-_T1))>>12)*_T3)>>14;
-    _t_fine = v1 + v2;
-    return (float)((_t_fine*5+128)>>8)/100.0f;
+    if(!_init)return NAN; int32_t aT; _readRaw(&aT,0,0);
+    int32_t v1=((((aT>>3)-((int32_t)_T1<<1)))*_T2)>>11;
+    int32_t v2=(((((aT>>4)-_T1)*((aT>>4)-_T1))>>12)*_T3)>>14;
+    _t_fine=v1+v2; return(float)((_t_fine*5+128)>>8)/100.0f;
 }
+
 float BMx280PIO_RP2040::readPressure() {
-    if (!_init) return NAN;
-    int32_t adc_T, adc_P; _readRaw(&adc_T, &adc_P, nullptr);
-    readTemperature();
-    double v1 = (double)_t_fine/2.0-64000.0;
-    double v2 = v1*v1*(double)_P6/32768.0;
-    v2 += v1*(double)_P5*2.0;
-    v2 = v2/4.0+(double)_P4*65536.0;
-    v1 = ((double)_P3*v1*v1/524288.0+(double)_P2*v1)/524288.0;
-    v1 = (1.0+v1/32768.0)*(double)_P1;
-    if (v1==0.0) return 0.0f;
-    double p = 1048576.0-(double)adc_P;
-    p = (p-v2/4096.0)*6250.0/v1;
-    v1 = (double)_P9*p*p/2147483648.0;
-    v2 = p*(double)_P8/32768.0;
-    p += (v1+v2+(double)_P7)/16.0;
-    return (float)(p/100.0);
+    if(!_init)return NAN; int32_t aT,aP; _readRaw(&aT,&aP,0); readTemperature();
+    double v1=(double)_t_fine/2.0-64000.0,v2=v1*v1*(double)_P6/32768.0;
+    v2+=v1*(double)_P5*2.0; v2=v2/4.0+(double)_P4*65536.0;
+    v1=((double)_P3*v1*v1/524288.0+(double)_P2*v1)/524288.0;
+    v1=(1.0+v1/32768.0)*(double)_P1; if(v1==0.0)return 0.0f;
+    double p=1048576.0-(double)aP; p=(p-v2/4096.0)*6250.0/v1;
+    v1=(double)_P9*p*p/2147483648.0; v2=p*(double)_P8/32768.0;
+    p+=(v1+v2+(double)_P7)/16.0; return(float)(p/100.0);
 }
+
 float BMx280PIO_RP2040::readHumidity() {
-    if (!_init||!_is_bme) return 0.0f;
-    int32_t adc_T, adc_H; _readRaw(&adc_T, nullptr, &adc_H);
-    readTemperature();
-    int32_t v1 = _t_fine-76800;
-    v1 = (int32_t)((((((int64_t)adc_H<<14)-((int64_t)_H4<<20)-((int64_t)_H5*v1))+16384)>>15)*
-                   ((((((((int64_t)v1*_H6)>>10)*((((int64_t)v1*_H3)>>11)+32768))>>10)+2097152)*_H2+8192)>>14));
-    v1 = v1-(((((v1>>15)*(v1>>15))>>7)*(int32_t)_H1)>>4);
-    v1 = v1<0?0:v1; v1 = v1>419430400?419430400:v1;
-    return (float)((uint32_t)(v1>>12))/1024.0f;
+    if(!_init||!_is_bme)return 0.0f; int32_t aT,aH; _readRaw(&aT,0,&aH); readTemperature();
+    int32_t hv=_t_fine-76800;
+    hv=(int32_t)((((((int64_t)aH<<14)-((int64_t)_H4<<20)-((int64_t)_H5*hv))+16384)>>15)*
+                 ((((((((int64_t)hv*_H6)>>10)*((((int64_t)hv*_H3)>>11)+32768))>>10)+2097152)*_H2+8192)>>14));
+    hv=hv-(((((hv>>15)*(hv>>15))>>7)*(int32_t)_H1)>>4);
+    hv=hv<0?0:hv; hv=hv>419430400?419430400:hv; return(float)((uint32_t)(hv>>12))/1024.0f;
 }
+
 void BMx280PIO_RP2040::readAll(float *t, float *p, float *h) {
-    if (!_init) { if(t)*t=NAN; if(p)*p=NAN; if(h)*h=NAN; return; }
+    if(!_init){if(t)*t=NAN;if(p)*p=NAN;if(h)*h=NAN;return;}
     int32_t aT,aP,aH; _readRaw(&aT,&aP,&aH);
     int32_t tv1=((((aT>>3)-((int32_t)_T1<<1)))*_T2)>>11;
     int32_t tv2=(((((aT>>4)-_T1)*((aT>>4)-_T1))>>12)*_T3)>>14;
-    _t_fine=tv1+tv2;
-    if(t)*t=(float)((_t_fine*5+128)>>8)/100.0f;
-    if(p){
-        double pv1=(double)_t_fine/2.0-64000.0;
-        double pv2=pv1*pv1*(double)_P6/32768.0;
-        pv2+=pv1*(double)_P5*2.0;
-        pv2=pv2/4.0+(double)_P4*65536.0;
-        pv1=((double)_P3*pv1*pv1/524288.0+(double)_P2*pv1)/524288.0;
-        pv1=(1.0+pv1/32768.0)*(double)_P1;
-        if(pv1==0.0){*p=0.0f;}else{
-            double pp=1048576.0-(double)aP;
-            pp=(pp-pv2/4096.0)*6250.0/pv1;
-            pv1=(double)_P9*pp*pp/2147483648.0;
-            pv2=pp*(double)_P8/32768.0;
-            pp+=(pv1+pv2+(double)_P7)/16.0;
-            *p=(float)(pp/100.0);
-        }
-    }
-    if(h){
-        if(!_is_bme){*h=0.0f;}else{
-            int32_t hv=_t_fine-76800;
-            hv=(int32_t)((((((int64_t)aH<<14)-((int64_t)_H4<<20)-((int64_t)_H5*hv))+16384)>>15)*
-                         ((((((((int64_t)hv*_H6)>>10)*((((int64_t)hv*_H3)>>11)+32768))>>10)+2097152)*_H2+8192)>>14));
-            hv=hv-(((((hv>>15)*(hv>>15))>>7)*(int32_t)_H1)>>4);
-            hv=hv<0?0:hv;hv=hv>419430400?419430400:hv;
-            *h=(float)((uint32_t)(hv>>12))/1024.0f;
-        }
-    }
+    _t_fine=tv1+tv2; if(t)*t=(float)((_t_fine*5+128)>>8)/100.0f;
+    if(p){double pv1=(double)_t_fine/2.0-64000.0,pv2=pv1*pv1*(double)_P6/32768.0;
+           pv2+=pv1*(double)_P5*2.0; pv2=pv2/4.0+(double)_P4*65536.0;
+           pv1=((double)_P3*pv1*pv1/524288.0+(double)_P2*pv1)/524288.0;
+           pv1=(1.0+pv1/32768.0)*(double)_P1; if(pv1==0.0){*p=0.0f;}else{
+           double pp=1048576.0-(double)aP; pp=(pp-pv2/4096.0)*6250.0/pv1;
+           pv1=(double)_P9*pp*pp/2147483648.0; pv2=pp*(double)_P8/32768.0;
+           pp+=(pv1+pv2+(double)_P7)/16.0; *p=(float)(pp/100.0);}}
+    if(h){if(!_is_bme){*h=0.0f;}else{int32_t hv=_t_fine-76800;
+           hv=(int32_t)((((((int64_t)aH<<14)-((int64_t)_H4<<20)-((int64_t)_H5*hv))+16384)>>15)*
+                        ((((((((int64_t)hv*_H6)>>10)*((((int64_t)hv*_H3)>>11)+32768))>>10)+2097152)*_H2+8192)>>14));
+           hv=hv-(((((hv>>15)*(hv>>15))>>7)*(int32_t)_H1)>>4);
+           hv=hv<0?0:hv; hv=hv>419430400?419430400:hv; *h=(float)((uint32_t)(hv>>12))/1024.0f;}}
 }
 
-// ─── PIO+DMA Auto-Scan ─────────────────────────────────────────────────
-
-bool BMx280PIO_RP2040::beginPIO(PIO pio) {
-    if (!_init||_transport!=TRANSPORT_PIO||!_pio_i2c) return false;
-    return _pio_i2c->beginPIO(pio);
-}
-
-bool BMx280PIO_RP2040::beginAutoScan(uint32_t period_ms) {
-    if (!_pio_i2c||!_pio_i2c->isPIOActive()) return false;
-    setMode(BME280_MODE_NORMAL);
-    if (period_ms >= 1000) _standby = BME280_STANDBY_1000MS;
-    else if (period_ms >= 500) _standby = BME280_STANDBY_500MS;
-    else _standby = BME280_STANDBY_250MS;
-    _applyConfig();
-    return _pio_i2c->beginAutoScan(_addr, BME280_REG_PRESS_MSB, _raw_async, 8, period_ms);
-}
-
-void BMx280PIO_RP2040::stopAutoScan() {
-    if (!_pio_i2c) return;
-    _pio_i2c->stopAutoScan();
-    setMode(BME280_MODE_SLEEP);
-}
-
-void BMx280PIO_RP2040::readAllAsync(float *t, float *p, float *h) {
-    if (!_init) { if(t)*t=NAN; if(p)*p=NAN; if(h)*h=NAN; return; }
-
-    // RX FIFO has exactly 8 words (data bytes only — ACKs not pushed).
-    // CH2 writes them sequentially to _raw_async[0..7]. No wrap, no offset.
-    if (_pio_i2c) _pio_i2c->resetRxBuffer();
-
-    _raw_bytes[0] = _raw_async[0] & 0xFF;
-    _raw_bytes[1] = _raw_async[1] & 0xFF;
-    _raw_bytes[2] = _raw_async[2] & 0xFF;
-    _raw_bytes[3] = _raw_async[3] & 0xFF;
-    _raw_bytes[4] = _raw_async[4] & 0xFF;
-    _raw_bytes[5] = _raw_async[5] & 0xFF;
-    _raw_bytes[6] = _raw_async[6] & 0xFF;
-    _raw_bytes[7] = _raw_async[7] & 0xFF;
-
-    int32_t aP = ((int32_t)_raw_bytes[0]<<12)|((int32_t)_raw_bytes[1]<<4)|(_raw_bytes[2]>>4);
-    int32_t aT = ((int32_t)_raw_bytes[3]<<12)|((int32_t)_raw_bytes[4]<<4)|(_raw_bytes[5]>>4);
-    int32_t aH = _is_bme ? (((int32_t)_raw_bytes[6]<<8)|_raw_bytes[7]) : 0;
-
-    int32_t tv1=((((aT>>3)-((int32_t)_T1<<1)))*_T2)>>11;
-    int32_t tv2=(((((aT>>4)-_T1)*((aT>>4)-_T1))>>12)*_T3)>>14;
-    _t_fine=tv1+tv2;
-    if(t)*t=(float)((_t_fine*5+128)>>8)/100.0f;
-    if(p){
-        double pv1=(double)_t_fine/2.0-64000.0;
-        double pv2=pv1*pv1*(double)_P6/32768.0;
-        pv2+=pv1*(double)_P5*2.0;
-        pv2=pv2/4.0+(double)_P4*65536.0;
-        pv1=((double)_P3*pv1*pv1/524288.0+(double)_P2*pv1)/524288.0;
-        pv1=(1.0+pv1/32768.0)*(double)_P1;
-        if(pv1==0.0){*p=0.0f;}else{
-            double pp=1048576.0-(double)aP;
-            pp=(pp-pv2/4096.0)*6250.0/pv1;
-            pv1=(double)_P9*pp*pp/2147483648.0;
-            pv2=pp*(double)_P8/32768.0;
-            pp+=(pv1+pv2+(double)_P7)/16.0;
-            *p=(float)(pp/100.0);
-        }
-    }
-    if(h){
-        if(!_is_bme){*h=0.0f;}else{
-            int32_t hv=_t_fine-76800;
-            hv=(int32_t)((((((int64_t)aH<<14)-((int64_t)_H4<<20)-((int64_t)_H5*hv))+16384)>>15)*
-                         ((((((((int64_t)hv*_H6)>>10)*((((int64_t)hv*_H3)>>11)+32768))>>10)+2097152)*_H2+8192)>>14));
-            hv=hv-(((((hv>>15)*(hv>>15))>>7)*(int32_t)_H1)>>4);
-            hv=hv<0?0:hv;hv=hv>419430400?419430400:hv;
-            *h=(float)((uint32_t)(hv>>12))/1024.0f;
-        }
-    }
-}
-
-uint8_t BMx280PIO_RP2040::getChipID() { uint8_t v=0;_i2c_read(BME280_REG_CHIP_ID,&v,1);return v; }
+uint8_t BMx280PIO_RP2040::getChipID() { uint8_t v=0; _i2c_read(BME280_REG_CHIP_ID,&v,1); return v; }
