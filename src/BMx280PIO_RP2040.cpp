@@ -1,17 +1,17 @@
 #include "BMx280PIO_RP2040.h"
-#include "WirePIO.h"
+#include <WirePIO.h>
 #include <hardware/gpio.h>
 
 BMx280PIO_RP2040::BMx280PIO_RP2040(TwoWire &wire, uint8_t addr)
     : _wire(&wire), _wirepio(nullptr), _addr(addr), _sda(0), _scl(0), _freq(100000),
-      _init(false), _is_bme(false),
+      _init(false), _is_bme(false), _force_gpio(false),
       _osrs_t(BME280_OS_1X), _osrs_p(BME280_OS_1X), _osrs_h(BME280_OS_1X),
       _filter(BME280_FILTER_OFF), _standby(BME280_STANDBY_250MS), _mode(BME280_MODE_SLEEP) {}
 
 BMx280PIO_RP2040::BMx280PIO_RP2040(uint8_t sda, uint8_t scl, uint8_t addr, uint32_t freq, PIO pio)
     : _wire(nullptr), _wirepio(new WirePIO(sda, scl, freq, pio)),
       _addr(addr), _sda(sda), _scl(scl), _freq(freq),
-      _init(false), _is_bme(false),
+      _init(false), _is_bme(false), _force_gpio(false),
       _osrs_t(BME280_OS_1X), _osrs_p(BME280_OS_1X), _osrs_h(BME280_OS_1X),
       _filter(BME280_FILTER_OFF), _standby(BME280_STANDBY_250MS), _mode(BME280_MODE_SLEEP) {}
 
@@ -38,10 +38,23 @@ static uint8_t rd(uint sd, uint sc, uint32_t f, bool last) {
 }
 
 bool BMx280PIO_RP2040::_i2c_write(uint8_t reg, const uint8_t *data, size_t len) {
-    if (_wirepio) {
+    if (_wirepio && !_force_gpio) {
         _wirepio->beginTransmission(_addr); _wirepio->write(reg);
         for (size_t i = 0; i < len; i++) _wirepio->write(data[i]);
         return _wirepio->endTransmission() == 0;
+    } else if (_wirepio && _force_gpio) {
+        // GPIO bit-bang write: start, addr+w, reg, data bytes, stop
+        uint8_t sd = _sda, sc = _scl; uint32_t f = 100000;
+        gpio_init(sd); gpio_set_dir(sd, GPIO_IN); gpio_pull_up(sd);
+        gpio_init(sc); gpio_set_dir(sc, GPIO_OUT); gpio_put(sc, 1);
+        start(sd, sc, f);
+        if (!wr(sd, sc, f, (uint8_t)(_addr << 1))) { stop(sd, sc, f); return false; }
+        if (!wr(sd, sc, f, reg)) { stop(sd, sc, f); return false; }
+        for (size_t i = 0; i < len; i++) {
+            if (!wr(sd, sc, f, data[i])) { stop(sd, sc, f); return false; }
+        }
+        stop(sd, sc, f);
+        return true;
     } else {
         _wire->beginTransmission(_addr); _wire->write(reg);
         for (size_t i = 0; i < len; i++) _wire->write(data[i]);
@@ -50,8 +63,8 @@ bool BMx280PIO_RP2040::_i2c_write(uint8_t reg, const uint8_t *data, size_t len) 
 }
 
 bool BMx280PIO_RP2040::_i2c_read(uint8_t reg, uint8_t *data, size_t len) {    if (_wirepio) {
-        // Fast path: PIO+DMA burstRead for up to 8 bytes
-        if (len <= 8 && _wirepio->burstRead(_addr, reg, data, len) == len)
+        // Fast path: PIO+DMA burstRead (skip if forced GPIO mode)
+        if (!_force_gpio && len <= 8 && _wirepio->burstRead(_addr, reg, data, len) == len)
             return true;
         // GPIO fallback: always use 100 kHz for reliable timing
         uint8_t sd = _sda, sc = _scl; uint32_t f = 100000; // safe GPIO speed
@@ -79,7 +92,7 @@ bool BMx280PIO_RP2040::_i2c_read(uint8_t reg, uint8_t *data, size_t len) {    if
 
 bool BMx280PIO_RP2040::begin() {
     if (_init) return true;
-    if (_wirepio) {
+    if (_wirepio && !_force_gpio) {
         _wirepio->begin();
         if (!_wirepio->isRunning()) return false;
     }
@@ -104,7 +117,11 @@ bool BMx280PIO_RP2040::beginPIO(PIO pio) {
 
 bool BMx280PIO_RP2040::_loadCalibration() {
     uint8_t b[26];
-    if (!_i2c_read(0x88, b, 26)) return false;
+    // Read in ≤8-byte chunks so burstRead can handle each chunk
+    if (!_i2c_read(0x88, b, 8)) return false;      // 0x88-0x8F
+    if (!_i2c_read(0x90, b+8, 8)) return false;    // 0x90-0x97
+    if (!_i2c_read(0x98, b+16, 8)) return false;   // 0x98-0x9F
+    if (!_i2c_read(0xA0, b+24, 2)) return false;   // 0xA0-0xA1
     _T1 = b[0]|(b[1]<<8); _T2 = b[2]|(b[3]<<8); _T3 = b[4]|(b[5]<<8);
     _P1 = b[6]|(b[7]<<8); _P2 = b[8]|(b[9]<<8); _P3 = b[10]|(b[11]<<8);
     _P4 = b[12]|(b[13]<<8); _P5 = b[14]|(b[15]<<8); _P6 = b[16]|(b[17]<<8);

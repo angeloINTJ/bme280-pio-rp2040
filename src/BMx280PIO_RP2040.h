@@ -78,6 +78,9 @@ public:
     float readHumidity();
     void  readAll(float *t, float *p, float *h);
 
+    void    forceGPIO(bool f) { _force_gpio = f; }
+    bool    isForcedGPIO() const { return _force_gpio; }
+
     uint8_t getChipID();
     bool isBME280() const { return _is_bme; }
     bool isInitialized() const { return _init; }
@@ -87,7 +90,7 @@ private:
     WirePIO  *_wirepio;
     uint8_t   _addr, _sda, _scl;
     uint32_t  _freq;
-    bool      _init, _is_bme;
+    bool      _init, _is_bme, _force_gpio;
     uint8_t   _osrs_t, _osrs_p, _osrs_h, _filter, _standby, _mode;
 
     uint16_t _T1; int16_t _T2, _T3;
