@@ -5,6 +5,9 @@
  * Auto-detects BMP280 vs BME280 by chip ID. Uses WirePIO for PIO+DMA
  * I2C on any GPIO pin pair, or hardware I2C via TwoWire&.
  *
+ * @note GPIO1/GPIO2 conflict with UART0 (Serial). Avoid using these pins
+ *       for I2C when Serial is active. TODO: auto-detect or document.
+ *
  * @author angeloINTJ
  * @license MIT
  */
