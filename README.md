@@ -274,7 +274,7 @@ The timing is conservative (slower than max spec) for robust operation. The BME2
 
 ## Dependencies
 
-- **[WirePIO](https://github.com/angeloINTJ/TwoWirePIO_RP2040) (>=1.3.2)** — PIO+DMA I2C transport layer (installed automatically by Library Manager)
+- **[WirePIO](https://github.com/angeloINTJ/TwoWirePIO_RP2040) (>=1.3.5)** — PIO+DMA I2C transport layer (installed automatically by Library Manager)
 - [arduino-pico](https://github.com/earlephilhower/arduino-pico) — Arduino core for RP2040 (Earle Philhower)
 
 ## Changelog
