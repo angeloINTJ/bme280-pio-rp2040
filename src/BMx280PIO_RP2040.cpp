@@ -154,8 +154,7 @@ void BMx280PIO_RP2040::_applyConfig() {
 
 void BMx280PIO_RP2040::setMode(uint8_t mode) {
     _mode = mode & 0x03; if (!_init) return;
-    uint8_t d; _i2c_read(BME280_REG_CTRL_MEAS, &d, 1);
-    d = (d & 0xFC) | (_mode & 0x03); _i2c_write(BME280_REG_CTRL_MEAS, &d, 1);
+    _applyConfig();
 }
 
 uint8_t BMx280PIO_RP2040::readRegister(uint8_t r) { uint8_t v=0; _i2c_read(r,&v,1); return v; }
