@@ -101,6 +101,13 @@ bool BMx280PIO_RP2040::begin() {
     if (_wirepio && !_force_gpio) {
         _wirepio->begin();
         if (!_wirepio->isRunning()) return false;
+        // Prime the PIO SM: first transaction after init may glitch.
+        // A dummy chip ID read warms up the SM clock and DMA.
+        uint8_t dummy;
+        for (int w = 0; w < 3; w++) {
+            _wirepio->burstRead(_addr, BME280_REG_CHIP_ID, &dummy, 1);
+            delayMicroseconds(200);
+        }
     }
     uint8_t rst = BME280_RESET_VALUE;
     _i2c_write(BME280_REG_RESET, &rst, 1);
@@ -112,6 +119,14 @@ bool BMx280PIO_RP2040::begin() {
     if (!_loadCalibration()) { Serial.println("CAL FAIL"); return false; }
 
     _applyConfig();
+    // Verify CTRL_MEAS was written (PIO+DMA cold-start may fail first write)
+    uint8_t expected = ((_osrs_t & 0x07) << 5) | ((_osrs_p & 0x07) << 2) | (_mode & 0x03);
+    for (int retry = 0; retry < 5; retry++) {
+        uint8_t ctrl = 0;
+        if (_i2c_read(BME280_REG_CTRL_MEAS, &ctrl, 1) && ctrl == expected) break;
+        delayMicroseconds(500);
+        _applyConfig();
+    }
     _init = true; return true;
 }
 
