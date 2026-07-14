@@ -9,10 +9,11 @@
 
 #define ADDR 0x76
 struct { const char *n; uint8_t sda, scl; PIO p; } cfg[]={
-    {"S1(2/3)",2,3,pio0},{"S2(4/5)",4,5,pio0},
-    {"S3(6/7)",6,7,pio1},{"S4(8/9)",8,9,pio1},
+    {"S0(0/1)",0,1,pio0},{"S1(2/3)",2,3,pio0},
+    {"S2(4/5)",4,5,pio0},{"S3(6/7)",6,7,pio1},
+    {"S4(8/9)",8,9,pio1},
 };
-#define N 4
+#define N 5
 #define CYCLES 3
 
 // Stats

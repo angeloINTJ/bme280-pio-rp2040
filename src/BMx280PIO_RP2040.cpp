@@ -101,12 +101,12 @@ bool BMx280PIO_RP2040::begin() {
     if (_wirepio && !_force_gpio) {
         _wirepio->begin();
         if (!_wirepio->isRunning()) return false;
-        // Prime the PIO SM: first transaction after init may glitch.
-        // A dummy chip ID read warms up the SM clock and DMA.
+        // Prime the PIO SM: first transactions after init may glitch.
+        // Multiple dummy reads warm up the SM clock, DMA, and GPIO switching.
         uint8_t dummy;
-        for (int w = 0; w < 3; w++) {
+        for (int w = 0; w < 5; w++) {
             _wirepio->burstRead(_addr, BME280_REG_CHIP_ID, &dummy, 1);
-            delayMicroseconds(200);
+            delayMicroseconds(300);
         }
     }
     uint8_t rst = BME280_RESET_VALUE;
