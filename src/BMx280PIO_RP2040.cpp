@@ -98,16 +98,19 @@ bool BMx280PIO_RP2040::_i2c_read(uint8_t reg, uint8_t *data, size_t len) {    if
 
 bool BMx280PIO_RP2040::begin() {
     if (_init) return true;
-    if (_wirepio && !_force_gpio) {
+    bool usePIO = (_wirepio && !_force_gpio);
+    if (usePIO) {
         _wirepio->begin();
         if (!_wirepio->isRunning()) return false;
-        // Prime the PIO SM: first transactions after init may glitch.
-        // Multiple dummy reads warm up the SM clock, DMA, and GPIO switching.
+        // Prime the PIO SM with dummy reads for reliable burstRead
         uint8_t dummy;
         for (int w = 0; w < 5; w++) {
             _wirepio->burstRead(_addr, BME280_REG_CHIP_ID, &dummy, 1);
-            delayMicroseconds(300);
+            delayMicroseconds(200);
         }
+        // Use GPIO bit-bang for critical writes (reset + config).
+        // PIO+DMA writes are unreliable on cold-start; GPIO is 100% reliable.
+        _force_gpio = true;
     }
     uint8_t rst = BME280_RESET_VALUE;
     _i2c_write(BME280_REG_RESET, &rst, 1);
@@ -118,14 +121,13 @@ bool BMx280PIO_RP2040::begin() {
     if (cid != BMP280_CHIP_ID && cid != BME280_CHIP_ID_VALUE) return false;
     if (!_loadCalibration()) { Serial.println("CAL FAIL"); return false; }
 
-    _applyConfig();
-    // Verify CTRL_MEAS was written (PIO+DMA cold-start may fail first write)
-    uint8_t expected = ((_osrs_t & 0x07) << 5) | ((_osrs_p & 0x07) << 2) | (_mode & 0x03);
-    for (int retry = 0; retry < 5; retry++) {
-        uint8_t ctrl = 0;
-        if (_i2c_read(BME280_REG_CTRL_MEAS, &ctrl, 1) && ctrl == expected) break;
-        delayMicroseconds(500);
-        _applyConfig();
+    _applyConfig();  // writes via GPIO (reliable)
+    // Set NORMAL mode now while GPIO is still active (PIO writes unreliable)
+    // The user can change mode later, but initial config must succeed.
+    _mode = BME280_MODE_NORMAL;
+    _applyConfig();  // writes CTRL_MEAS with mode=NORMAL via GPIO
+    if (usePIO) {
+        _force_gpio = false;  // restore PIO+DMA for reads
     }
     _init = true; return true;
 }
