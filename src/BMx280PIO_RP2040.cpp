@@ -147,7 +147,16 @@ void BMx280PIO_RP2040::_applyConfig() {
     uint8_t d;
     if (_is_bme) { d = _osrs_h & 0x07; _i2c_write(BME280_REG_CTRL_HUM, &d, 1); }
     d = ((_osrs_t & 0x07) << 5) | ((_osrs_p & 0x07) << 2) | (_mode & 0x03);
-    _i2c_write(BME280_REG_CTRL_MEAS, &d, 1);
+    // Retry up to 3 times if write fails (NACK detection in PIO v2)
+    bool ok = false;
+    for (int retry = 0; retry < 3; retry++) {
+        if (_i2c_write(BME280_REG_CTRL_MEAS, &d, 1)) { ok = true; break; }
+        delayMicroseconds(500);
+    }
+    if (!ok) {
+        Serial.print("WARN: CTRL_MEAS write failed after 3 retries (val=0x");
+        Serial.print(d, HEX); Serial.println(")");
+    }
     d = ((_standby & 0x07) << 5) | ((_filter & 0x07) << 2);
     _i2c_write(BME280_REG_CONFIG, &d, 1);
 }

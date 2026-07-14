@@ -28,7 +28,7 @@
 #define SENSOR_B_SCL  7
 #define BMP280_ADDR   0x76
 #define NUM_READINGS  1000
-#define WARMUP        10
+#define WARMUP        50
 
 // ─── Stress Matemático (Core 1) ────────────────────────────────────────
 volatile bool     g_stressActive = false;
