@@ -1,6 +1,6 @@
 {
   "name": "BMx280PIO_RP2040",
-  "version": "1.2.4",
+  "version": "1.3.0",
   "description": "BMP280/BME280 sensor driver for Raspberry Pi Pico (RP2040). Uses TwoWirePIO_RP2040 (WirePIO) for PIO+DMA I2C on any GPIO pins. Also supports hardware I2C (Wire). Auto-detects BMP280 vs BME280. forceGPIO() method for benchmarking GPIO bit-bang mode.",
   "keywords": [
     "BMP280",
